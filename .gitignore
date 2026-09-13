@@ -1,0 +1,5 @@
+*.sock
+dist/
+*.exe
+*.test
+*.syso
