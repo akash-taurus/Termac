@@ -1,12 +1,16 @@
 package git
 
 import (
+	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	libgit "github.com/go-git/go-git/v5"
 )
@@ -22,43 +26,57 @@ type LocalRepository struct {
 	HasError bool
 }
 
+// gitTimeout bounds every git subprocess so a credential prompt can never hang the UI.
+const gitTimeout = 30 * time.Second
+
+func runGit(repoPath string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = repoPath
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	return cmd.CombinedOutput()
+}
+
 // ScanDirectory scans a directory for git repositories
 // Returns all found repositories, up to a maximum depth
 func ScanDirectory(rootDir string, maxDepth int) ([]LocalRepository, error) {
+	if maxDepth <= 0 {
+		maxDepth = 3
+	}
+	baseDepth := strings.Count(filepath.Clean(rootDir), string(filepath.Separator))
 	var repos []LocalRepository
 
-	err := filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(rootDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return err
+			return filepath.SkipDir
 		}
-		if info.IsDir() {
-			// Check if this is a git repository
-			if isGitRepo(path) {
-				_, err := OpenRepository(path)
-				if err != nil {
-					// Still add it but mark as error
-					repos = append(repos, LocalRepository{
-						Path:      path,
-						HasError:  true,
-						WorkDir:   path,
-						Message:   err.Error(),
-					})
-					return nil
-				}
-
-				// Get repository info
-				info, err := GetRepositoryInfo(path)
-				if err != nil {
-					repos = append(repos, LocalRepository{
-						Path:      path,
-						HasError:  true,
-						Message:   err.Error(),
-					})
-					return nil
-				}
-
+		if !d.IsDir() {
+			return nil
+		}
+		depth := strings.Count(filepath.Clean(path), string(filepath.Separator)) - baseDepth
+		if depth > maxDepth {
+			return filepath.SkipDir
+		}
+		name := d.Name()
+		// Skip heavy/irrelevant dirs.
+		if name == ".git" || name == "node_modules" || name == ".hg" || name == ".svn" {
+			return filepath.SkipDir
+		}
+		// Check if this is a git repository
+		if isGitRepo(path) {
+			info, err := GetRepositoryInfo(path)
+			if err != nil {
+				repos = append(repos, LocalRepository{
+					Path:     path,
+					HasError: true,
+					WorkDir:  path,
+					Message:  err.Error(),
+				})
+			} else {
 				repos = append(repos, *info)
 			}
+			return filepath.SkipDir
 		}
 		return nil
 	})
@@ -139,8 +157,16 @@ func GetStatus(repo *libgit.Repository) (string, error) {
 
 	var changes []string
 	for path, fileStatus := range status {
-		switch fileStatus.Worktree {
-		case libgit.Unmodified: // Skip unmodified files
+		// Consider staged changes too: a file staged but untouched in worktree
+		// reports Worktree=Unmodified with Staging set.
+		wt := fileStatus.Worktree
+		st := fileStatus.Staging
+		switch wt {
+		case libgit.Unmodified:
+			if st == libgit.Unmodified {
+				continue
+			}
+			changes = append(changes, fmt.Sprintf("%s: Staged", path))
 		case libgit.Untracked:
 			changes = append(changes, fmt.Sprintf("%s: Untracked", path))
 		case libgit.Modified:
@@ -153,12 +179,17 @@ func GetStatus(repo *libgit.Repository) (string, error) {
 			changes = append(changes, fmt.Sprintf("%s: Renamed", path))
 		case libgit.Copied:
 			changes = append(changes, fmt.Sprintf("%s: Copied", path))
+		default:
+			if st != libgit.Unmodified {
+				changes = append(changes, fmt.Sprintf("%s: Staged", path))
+			}
 		}
 	}
 
 	if len(changes) == 0 {
 		return "Modified", nil
 	}
+	sort.Strings(changes)
 	return strings.Join(changes, "; "), nil
 }
 
@@ -178,8 +209,17 @@ func GetDiffSummary(repo *libgit.Repository) (string, error) {
 	return "Clean", nil
 }
 
-// ParseRemoteURL parses a git remote URL and extracts the host and repo name
-func ParseRemoteURL(url string) (host, repoName string) {
+// ParseRemoteURL parses a git remote URL and extracts the host and repo name.
+// Credentials (user:token@) are stripped so they never appear in the UI.
+func ParseRemoteURL(raw string) (host, repoName string) {
+	trimmed := strings.TrimSpace(raw)
+	// Strip credentials via net/url when possible.
+	if u, err := url.Parse(trimmed); err == nil && u.Host != "" {
+		host = u.Host
+		repoName = strings.TrimSuffix(strings.TrimPrefix(u.Path, "/"), ".git")
+		return host, repoName
+	}
+	url := trimmed
 	// Remove "git@" prefix (SSH format)
 	if strings.HasPrefix(url, "git@") {
 		url = strings.TrimPrefix(url, "git@")
@@ -340,9 +380,7 @@ func IsGitRepository(path string) bool {
 
 // GitInit initializes a new git repository in the given directory
 func GitInit(dirPath string) error {
-	cmd := exec.Command("git", "init")
-	cmd.Dir = dirPath
-	out, err := cmd.CombinedOutput()
+	out, err := runGit(dirPath, "init")
 	if err != nil {
 		return fmt.Errorf("git init failed: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
@@ -351,9 +389,7 @@ func GitInit(dirPath string) error {
 
 // GitStageAll runs `git add -A` in the repository
 func GitStageAll(repoPath string) error {
-	cmd := exec.Command("git", "add", "-A")
-	cmd.Dir = repoPath
-	out, err := cmd.CombinedOutput()
+	out, err := runGit(repoPath, "add", "-A")
 	if err != nil {
 		return fmt.Errorf("git add failed: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
@@ -367,24 +403,20 @@ func GitCommit(repoPath string, message string) (string, error) {
 		return "", fmt.Errorf("commit message cannot be empty")
 	}
 
-	cmd := exec.Command("git", "commit", "-m", message)
-	cmd.Dir = repoPath
-	out, err := cmd.CombinedOutput()
+	out, err := runGit(repoPath, "commit", "-m", message)
 	trimmed := strings.TrimSpace(string(out))
 	if err != nil {
-		return "", fmt.Errorf("git commit failed: %s", trimmed)
+		return "", fmt.Errorf("git commit failed: %s: %w", trimmed, err)
 	}
 	return trimmed, nil
 }
 
 // GitPush pushes current branch to remote
 func GitPush(repoPath string) (string, error) {
-	cmd := exec.Command("git", "push")
-	cmd.Dir = repoPath
-	out, err := cmd.CombinedOutput()
+	out, err := runGit(repoPath, "push")
 	trimmed := strings.TrimSpace(string(out))
 	if err != nil {
-		return "", fmt.Errorf("%s", trimmed)
+		return "", fmt.Errorf("git push failed: %s: %w", trimmed, err)
 	}
 	if trimmed == "" {
 		trimmed = "Everything up-to-date"
@@ -394,24 +426,20 @@ func GitPush(repoPath string) (string, error) {
 
 // GitPull pulls latest changes from remote
 func GitPull(repoPath string) (string, error) {
-	cmd := exec.Command("git", "pull")
-	cmd.Dir = repoPath
-	out, err := cmd.CombinedOutput()
+	out, err := runGit(repoPath, "pull")
 	trimmed := strings.TrimSpace(string(out))
 	if err != nil {
-		return "", fmt.Errorf("%s", trimmed)
+		return "", fmt.Errorf("git pull failed: %s: %w", trimmed, err)
 	}
 	return trimmed, nil
 }
 
 // GitFetch fetches changes from remote
 func GitFetch(repoPath string) (string, error) {
-	cmd := exec.Command("git", "fetch")
-	cmd.Dir = repoPath
-	out, err := cmd.CombinedOutput()
+	out, err := runGit(repoPath, "fetch")
 	trimmed := strings.TrimSpace(string(out))
 	if err != nil {
-		return "", fmt.Errorf("%s", trimmed)
+		return "", fmt.Errorf("git fetch failed: %s: %w", trimmed, err)
 	}
 	if trimmed == "" {
 		trimmed = "Fetch complete"
@@ -421,15 +449,21 @@ func GitFetch(repoPath string) (string, error) {
 
 // GitDiff returns the git diff output
 func GitDiff(repoPath string) (string, error) {
-	cmd := exec.Command("git", "diff", "HEAD")
-	cmd.Dir = repoPath
-	out, err := cmd.CombinedOutput()
+	if !isGitRepo(repoPath) {
+		return "", fmt.Errorf("not a git repository: %s", repoPath)
+	}
+	out, err := runGit(repoPath, "diff", "--no-color", "HEAD", "--")
 	trimmed := strings.TrimSpace(string(out))
-	if err != nil || trimmed == "" {
-		cmd2 := exec.Command("git", "diff")
-		cmd2.Dir = repoPath
-		out2, _ := cmd2.CombinedOutput()
+	if err != nil {
+		// git diff HEAD fails with non-zero when no HEAD yet; try plain diff.
+		out2, err2 := runGit(repoPath, "diff", "--no-color", "--")
+		if err2 != nil {
+			return "", fmt.Errorf("git diff failed: %w", err2)
+		}
 		trimmed = strings.TrimSpace(string(out2))
+	}
+	if len(trimmed) > 200000 {
+		trimmed = trimmed[:200000] + "\n... (truncated: diff too large) ..."
 	}
 	if trimmed == "" {
 		trimmed = "(No uncommitted changes to display)"
@@ -450,9 +484,10 @@ func GitLog(repoPath string, maxCount int) ([]CommitLogItem, error) {
 	if maxCount <= 0 {
 		maxCount = 10
 	}
-	cmd := exec.Command("git", "log", fmt.Sprintf("-n%d", maxCount), "--pretty=format:%h|%an|%cr|%s")
-	cmd.Dir = repoPath
-	out, err := cmd.CombinedOutput()
+	if maxCount > 100 {
+		maxCount = 100
+	}
+	out, err := runGit(repoPath, "log", fmt.Sprintf("-n%d", maxCount), "--pretty=format:%h|%an|%cr|%s")
 	if err != nil {
 		return nil, err
 	}
@@ -504,9 +539,7 @@ func GitStatusDetailed(repoPath string) (*DetailedGitStatus, error) {
 		return &DetailedGitStatus{IsGitRepo: false}, nil
 	}
 
-	cmd := exec.Command("git", "status", "--porcelain=v1", "-b")
-	cmd.Dir = repoPath
-	out, err := cmd.CombinedOutput()
+	out, err := runGit(repoPath, "status", "--porcelain=v1", "-b")
 	if err != nil {
 		return nil, fmt.Errorf("git status error: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
@@ -537,9 +570,13 @@ func GitStatusDetailed(repoPath string) (*DetailedGitStatus, error) {
 					for _, item := range strings.Split(bracket, ",") {
 						item = strings.TrimSpace(item)
 						if strings.HasPrefix(item, "ahead ") {
-							res.Ahead, _ = strconv.Atoi(strings.TrimPrefix(item, "ahead "))
+							if n, err := strconv.Atoi(strings.TrimPrefix(item, "ahead ")); err == nil {
+								res.Ahead = n
+							}
 						} else if strings.HasPrefix(item, "behind ") {
-							res.Behind, _ = strconv.Atoi(strings.TrimPrefix(item, "behind "))
+							if n, err := strconv.Atoi(strings.TrimPrefix(item, "behind ")); err == nil {
+								res.Behind = n
+							}
 						}
 					}
 				} else {
@@ -559,6 +596,13 @@ func GitStatusDetailed(repoPath string) (*DetailedGitStatus, error) {
 			stagedChar := line[0]
 			worktreeChar := line[1]
 			filePath := strings.TrimSpace(line[3:])
+			// Strip quotes git adds for paths with spaces/specials.
+			filePath = strings.Trim(filePath, `"`)
+			// Rename format: "old -> new"; track the new path.
+			if idx := strings.Index(filePath, " -> "); idx >= 0 {
+				filePath = strings.TrimSpace(filePath[idx+4:])
+				filePath = strings.Trim(filePath, `"`)
+			}
 
 			if stagedChar == '?' && worktreeChar == '?' {
 				res.UntrackedCount++
@@ -581,32 +625,42 @@ func GitStatusDetailed(repoPath string) (*DetailedGitStatus, error) {
 
 // GitSetRemote adds or updates a git remote
 func GitSetRemote(repoPath, remoteName, remoteURL string) error {
-	checkCmd := exec.Command("git", "remote", "get-url", remoteName)
-	checkCmd.Dir = repoPath
-	if err := checkCmd.Run(); err == nil {
-		setCmd := exec.Command("git", "remote", "set-url", remoteName, remoteURL)
-		setCmd.Dir = repoPath
-		out, err := setCmd.CombinedOutput()
+	if !validRemoteName(remoteName) {
+		return fmt.Errorf("invalid remote name %q", remoteName)
+	}
+	out, err := runGit(repoPath, "remote", "get-url", "--", remoteName)
+	if err == nil {
+		_ = out
+		setOut, err := runGit(repoPath, "remote", "set-url", remoteName, remoteURL)
 		if err != nil {
-			return fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
+			return fmt.Errorf("%s: %w", strings.TrimSpace(string(setOut)), err)
 		}
 		return nil
 	}
 
-	addCmd := exec.Command("git", "remote", "add", remoteName, remoteURL)
-	addCmd.Dir = repoPath
-	out, err := addCmd.CombinedOutput()
+	addOut, err := runGit(repoPath, "remote", "add", remoteName, remoteURL)
 	if err != nil {
-		return fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
+		return fmt.Errorf("%s: %w", strings.TrimSpace(string(addOut)), err)
 	}
 	return nil
 }
 
+func validRemoteName(s string) bool {
+	if s == "" || len(s) > 100 {
+		return false
+	}
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // GitBranchName gets the active branch name, defaulting to "main"
 func GitBranchName(repoPath string) string {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = repoPath
-	out, err := cmd.CombinedOutput()
+	out, err := runGit(repoPath, "rev-parse", "--abbrev-ref", "HEAD")
 	branch := strings.TrimSpace(string(out))
 	if err != nil || branch == "" || branch == "HEAD" {
 		return "main"
@@ -616,23 +670,133 @@ func GitBranchName(repoPath string) string {
 
 // GitEnsureBranch sets or renames the branch name (e.g. main)
 func GitEnsureBranch(repoPath, branchName string) error {
-	cmd := exec.Command("git", "branch", "-M", branchName)
-	cmd.Dir = repoPath
-	_ = cmd.Run()
+	branchName = strings.TrimSpace(branchName)
+	if branchName == "" || strings.ContainsAny(branchName, " ~^:?*[]\\") || strings.HasPrefix(branchName, "-") {
+		return fmt.Errorf("invalid branch name %q", branchName)
+	}
+	out, err := runGit(repoPath, "branch", "-M", branchName)
+	if err != nil {
+		return fmt.Errorf("git branch failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
 	return nil
 }
 
-// GitPushUpstream pushes a branch to remote and configures tracking
+// GitPushUpstream pushes a branch to remote and configures tracking.
+// remoteOrURL must be a remote NAME (e.g. "origin"); token-embedded URLs are
+// rejected to avoid leaking secrets into .git/config and process listings.
+// Use GitPushUpstreamAuth for authenticated pushes.
 func GitPushUpstream(repoPath, remoteOrURL, branchName string) (string, error) {
+	if strings.Contains(remoteOrURL, "@") && strings.Contains(remoteOrURL, "://") {
+		return "", fmt.Errorf("refusing to push with credentialed URL; use GitPushUpstreamAuth")
+	}
 	if branchName == "" {
 		branchName = GitBranchName(repoPath)
 	}
-	cmd := exec.Command("git", "push", "-u", remoteOrURL, branchName)
+	out, err := runGit(repoPath, "push", "-u", "--", remoteOrURL, branchName)
+	trimmed := strings.TrimSpace(string(out))
+	if err != nil {
+		return trimmed, fmt.Errorf("git push failed: %s: %w", trimmed, err)
+	}
+	return trimmed, nil
+}
+
+// GitPushUpstreamAuth pushes using an Authorization header so the token never
+// appears in argv (.ps visible) or .git/config (persisted upstream). The
+// remote URL on disk stays clean; only this invocation carries the secret.
+func GitPushUpstreamAuth(repoPath, remoteName, branchName, token string) (string, error) {
+	if branchName == "" {
+		branchName = GitBranchName(repoPath)
+	}
+	if token == "" {
+		return GitPushUpstream(repoPath, remoteName, branchName)
+	}
+	header := "AUTHORIZATION: bearer " + token
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-c", "http.extraHeader="+header, "push", "-u", "--", remoteName, branchName)
 	cmd.Dir = repoPath
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	out, err := cmd.CombinedOutput()
 	trimmed := strings.TrimSpace(string(out))
 	if err != nil {
-		return trimmed, fmt.Errorf("%s", trimmed)
+		return trimmed, fmt.Errorf("git push failed: %s: %w", trimmed, err)
 	}
 	return trimmed, nil
+}
+
+// GitHasCommits checks whether the repository has at least one commit (HEAD resolves)
+func GitHasCommits(repoPath string) bool {
+	out, err := runGit(repoPath, "rev-parse", "--verify", "HEAD")
+	_ = out
+	return err == nil
+}
+
+// gitAuthFailureMarkers are case-insensitive substrings typical of git
+// remote authentication/authorization rejections (HTTPS credential or
+// token problems, revoked PATs, missing permissions).
+var gitAuthFailureMarkers = []string{
+	"authentication failed",
+	"invalid username",
+	"invalid credentials",
+	"could not read username",
+	"could not read password",
+	"permission denied",
+	"remote: permission",
+	"access denied",
+	"account suspended",
+	"token expired",
+	"token has expired",
+	"invalid token",
+	"bad credentials",
+	"logon failed",
+	"returned error: 401",
+	"returned error: 403",
+	"error: 401",
+	"error: 403",
+	"http 401",
+	"http 403",
+	"status 401",
+	"status 403",
+}
+
+// IsGitAuthFailure reports whether combined git command output looks like a
+// remote authentication/authorization rejection rather than e.g. a conflict,
+// missing branch, or network error.
+func IsGitAuthFailure(output string) bool {
+	lowered := strings.ToLower(output)
+	for _, marker := range gitAuthFailureMarkers {
+		if strings.Contains(lowered, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// EmbedTokenInHTTPSURL returns rawURL with an x-access-token credential
+// embedded for HTTPS remotes. Non-HTTPS URLs (SSH, local paths) and empty
+// tokens are returned unchanged.
+// Deprecated: embedding tokens leaks into ps and .git/config. Prefer
+// GitPushUpstreamAuth which uses http.extraHeader.
+func EmbedTokenInHTTPSURL(rawURL, token string) string {
+	if token == "" {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return rawURL
+	}
+	u.User = url.UserPassword("x-access-token", token)
+	return u.String()
+}
+
+// GetRemoteURL returns the configured URL for a git remote (e.g. "origin").
+func GetRemoteURL(repoPath, remoteName string) (string, error) {
+	if !validRemoteName(remoteName) {
+		return "", fmt.Errorf("invalid remote name %q", remoteName)
+	}
+	out, err := runGit(repoPath, "remote", "get-url", "--", remoteName)
+	if err != nil {
+		return "", fmt.Errorf("no remote %q: %s", remoteName, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
 }

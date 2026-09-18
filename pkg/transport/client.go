@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"fmt"
 
 	"google.golang.org/grpc"
 
@@ -20,5 +21,8 @@ func NewPluginClient(ctx context.Context, pipePath string) (plugin.WidgetPluginC
 
 // ConnectToPlugin connects to a plugin and returns a client
 func ConnectToPlugin(ctx context.Context, addr *Address) (plugin.WidgetPluginClient, *grpc.ClientConn, error) {
+	if addr == nil || addr.Path == "" {
+		return nil, nil, fmt.Errorf("invalid plugin address")
+	}
 	return NewPluginClient(ctx, addr.Path)
 }

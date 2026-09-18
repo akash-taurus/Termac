@@ -27,11 +27,11 @@ func (m MemoryMetrics) FreeGB() float64 {
 
 // DiskMetrics contains disk usage for a specific drive
 type DiskMetrics struct {
-	DriveLetter    string
-	TotalBytes     uint64
-	FreeBytes      uint64
-	UsedBytes      uint64
-	UsedPercent    float64
+	DriveLetter string
+	TotalBytes  uint64
+	FreeBytes   uint64
+	UsedBytes   uint64
+	UsedPercent float64
 }
 
 func (d DiskMetrics) TotalGB() float64 {
@@ -56,22 +56,25 @@ type ProcessInfo struct {
 
 // SystemSnapshot captures complete host resource utilization at a point in time
 type SystemSnapshot struct {
-	Timestamp      time.Time
-	CPUPercent     float64
-	CPUHistory     []float64
-	Memory         MemoryMetrics
-	Disks          []DiskMetrics
-	ProcessCount   int
-	ThreadCount    int
-	TopProcesses   []ProcessInfo
+	Timestamp    time.Time
+	CPUPercent   float64
+	CPUHistory   []float64
+	Memory       MemoryMetrics
+	Disks        []DiskMetrics
+	ProcessCount int
+	ThreadCount  int
+	TopProcesses []ProcessInfo
 }
 
 // FormatSparkline produces a Unicode sparkline graph for recent history values (0-100)
 func FormatSparkline(values []float64, width int) string {
-	if len(values) == 0 {
+	if len(values) == 0 || width <= 0 {
 		return ""
 	}
-	bars := []rune{' ', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
+	if width > 500 {
+		width = 500
+	}
+	bars := []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
 	// Truncate or pad to width
 	start := 0
 	if len(values) > width {
@@ -81,6 +84,13 @@ func FormatSparkline(values []float64, width int) string {
 
 	result := make([]rune, len(slice))
 	for i, v := range slice {
+		// Clamp NaN/Inf/out-of-range.
+		if v != v || v < 0 {
+			v = 0
+		}
+		if v > 100 {
+			v = 100
+		}
 		idx := int((v / 100.0) * float64(len(bars)-1))
 		if idx < 0 {
 			idx = 0
@@ -103,6 +113,13 @@ func HumanSize(bytes uint64) string {
 	for n := bytes / unit; n >= unit; n /= unit {
 		div *= unit
 		exp++
+		if exp >= 5 {
+			break
+		}
 	}
-	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+	units := "KMGTPE"
+	if exp >= len(units) {
+		exp = len(units) - 1
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), units[exp])
 }

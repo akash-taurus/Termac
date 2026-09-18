@@ -6,18 +6,18 @@ import (
 
 // Palette defines the colors used throughout the dashboard TUI
 type Palette struct {
-	Name        string
-	Primary     lipgloss.Color
-	Secondary   lipgloss.Color
-	Accent      lipgloss.Color
-	Background  lipgloss.Color
-	Foreground  lipgloss.Color
-	Muted       lipgloss.Color
-	Success     lipgloss.Color
-	Warning     lipgloss.Color
-	Danger      lipgloss.Color
-	Border      lipgloss.Color
-	Highlight   lipgloss.Color
+	Name       string
+	Primary    lipgloss.Color
+	Secondary  lipgloss.Color
+	Accent     lipgloss.Color
+	Background lipgloss.Color
+	Foreground lipgloss.Color
+	Muted      lipgloss.Color
+	Success    lipgloss.Color
+	Warning    lipgloss.Color
+	Danger     lipgloss.Color
+	Border     lipgloss.Color
+	Highlight  lipgloss.Color
 }
 
 var (

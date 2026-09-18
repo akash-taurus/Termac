@@ -43,25 +43,42 @@ func GetProcessTCPSockets(pid int) ([]TCPConnection, error) {
 			return nil, fmt.Errorf("GetExtendedTcpTable failed: %d", ret)
 		}
 	}
+	if size == 0 {
+		return nil, nil
+	}
 
 	// Allocate buffer
 	buf := make([]byte, size)
-	ret, _, _ = getExtendedTcpTable.Call(
-		uintptr(unsafe.Pointer(&buf[0])),
-		uintptr(unsafe.Pointer(&size)),
-		1, // bOrder
-		syscall.AF_INET,
-		5, // TCP_TABLE_OWNER_PID_ALL
-		0, // dwReserved
-	)
+	for attempts := 0; attempts < 3; attempts++ {
+		ret, _, _ = getExtendedTcpTable.Call(
+			uintptr(unsafe.Pointer(&buf[0])),
+			uintptr(unsafe.Pointer(&size)),
+			1, // bOrder
+			syscall.AF_INET,
+			5, // TCP_TABLE_OWNER_PID_ALL
+			0, // dwReserved
+		)
+		if ret == 122 { // table grew between calls; resize and retry
+			buf = make([]byte, size)
+			if len(buf) == 0 {
+				return nil, nil
+			}
+			continue
+		}
+		break
+	}
 
 	if ret != 0 {
 		return nil, fmt.Errorf("GetExtendedTcpTable failed: %d", ret)
 	}
 
-	// Parse the table
+	// Parse the table. Guard against kernel growing the table between calls.
 	table := (*MIB_TCPTABLE_OWNER_PID)(unsafe.Pointer(&buf[0]))
 	numEntries := int(table.dwNumEntries)
+	rowSize := int(unsafe.Sizeof(MIB_TCPROW_OWNER_PID{}))
+	if numEntries < 0 || 4+numEntries*rowSize > len(buf) {
+		return nil, fmt.Errorf("TCP table size mismatch (entries=%d buf=%d)", numEntries, len(buf))
+	}
 
 	// MIB_TCPROW_OWNER_PID starts right after dwNumEntries
 	rowPtr := unsafe.Pointer(uintptr(unsafe.Pointer(&table.table[0])))
@@ -131,18 +148,18 @@ type MIB_TCPTABLE_OWNER_PID struct {
 }
 
 const (
-	MIB_TCP_STATE_CLOSED      = 1
-	MIB_TCP_STATE_LISTEN      = 2
-	MIB_TCP_STATE_SYN_SENT    = 3
-	MIB_TCP_STATE_SYN_RCVD    = 4
-	MIB_TCP_STATE_ESTAB       = 5
-	MIB_TCP_STATE_FIN_WAIT1   = 6
-	MIB_TCP_STATE_FIN_WAIT2   = 7
-	MIB_TCP_STATE_CLOSE_WAIT  = 8
-	MIB_TCP_STATE_CLOSING     = 9
-	MIB_TCP_STATE_LAST_ACK    = 10
-	MIB_TCP_STATE_TIME_WAIT   = 11
-	MIB_TCP_STATE_DELETE_TCB  = 12
+	MIB_TCP_STATE_CLOSED     = 1
+	MIB_TCP_STATE_LISTEN     = 2
+	MIB_TCP_STATE_SYN_SENT   = 3
+	MIB_TCP_STATE_SYN_RCVD   = 4
+	MIB_TCP_STATE_ESTAB      = 5
+	MIB_TCP_STATE_FIN_WAIT1  = 6
+	MIB_TCP_STATE_FIN_WAIT2  = 7
+	MIB_TCP_STATE_CLOSE_WAIT = 8
+	MIB_TCP_STATE_CLOSING    = 9
+	MIB_TCP_STATE_LAST_ACK   = 10
+	MIB_TCP_STATE_TIME_WAIT  = 11
+	MIB_TCP_STATE_DELETE_TCB = 12
 )
 
 func formatIPPort(addr uint32, port uint32) string {

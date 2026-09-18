@@ -11,12 +11,15 @@ import (
 // KillProcessTree forcefully terminates the target process and its process group on POSIX systems.
 //
 // Behavior:
-// - Returns ErrInvalidPID if pid <= 0.
-// - Sends SIGKILL to the process group (-pid).
+// - Returns ErrInvalidPID if pid <= 0 or pid == 1 (never kill init).
+// - Sends SIGKILL to the process group (-pid). Callers must ensure the
+// - target was started with Setpgid=true (see launcher.applyPlatformAttributes),
+// - otherwise -pid may target the wrong group.
 // - If ESRCH is returned, returns nil (idempotent success).
 // - If process group kill fails, falls back to killing the single process (pid).
+// - Note: children that called setsid() escape the group kill and may leak.
 func KillProcessTree(pid int) error {
-	if pid <= 0 {
+	if pid <= 0 || pid == 1 {
 		return ErrInvalidPID
 	}
 
@@ -32,5 +35,8 @@ func KillProcessTree(pid int) error {
 		return nil
 	}
 
-	return fmt.Errorf("failed to kill process %d: %w", pid, err)
+	return errors.Join(
+		fmt.Errorf("failed to kill process group %d: %w", pid, err),
+		fmt.Errorf("fallback single kill %d failed: %w", pid, fallbackErr),
+	)
 }

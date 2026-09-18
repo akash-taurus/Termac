@@ -2,8 +2,16 @@
 
 package launcher
 
-import "os/exec"
+import (
+	"os/exec"
+	"syscall"
+)
 
 func applyPlatformAttributes(cmd *exec.Cmd) {
-	// No-op for non-Windows platforms to ensure cross-compilation success.
+	// Put plugin in its own process group so Kill(-pid) targets only
+	// the plugin tree, never the dashboard's group.
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
 }

@@ -3,3 +3,15 @@ dist/
 *.exe
 *.test
 *.syso
+*.exe~
+ok.txt
+.agents/
+.vscode/
+.idea/
+*.log
+coverage.out
+coverage.html
+.DS_Store
+Thumbs.db
+*.swp
+*~

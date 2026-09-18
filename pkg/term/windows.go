@@ -16,6 +16,8 @@ const (
 	ENABLE_MOUSE_INPUT = 0x0010
 	// ENABLE_QUICK_EDIT_MODE is used to disable quick edit mode
 	ENABLE_QUICK_EDIT_MODE = 0x0040
+	// ENABLE_EXTENDED_FLAGS is required for quick-edit changes to take effect
+	ENABLE_EXTENDED_FLAGS = 0x0080
 	// CP_UTF8 is the Windows code page for UTF-8 encoding
 	CP_UTF8 = 65001
 )
@@ -48,9 +50,18 @@ func EnableWindowsVirtualTerminal() error {
 }
 
 // EnableMouseInput enables mouse input and disables quick edit mode on Windows
-// Returns nil on success, or an error if mouse input cannot be enabled
+// Returns nil on success, or an error if mouse input cannot be enabled.
+// Uses STD_INPUT_HANDLE: mouse/quick-edit are INPUT modes, not OUTPUT.
 func EnableMouseInput() error {
-	handle := windows.Handle(os.Stdout.Fd())
+	handle := windows.Handle(windows.STD_INPUT_HANDLE)
+	// windows.STD_INPUT_HANDLE const is int; GetStdHandle indirection needed
+	// when Stdout is redirected. Resolve the real input handle:
+	if h, err := windows.GetStdHandle(windows.STD_INPUT_HANDLE); err == nil {
+		handle = h
+	}
+	if ft, _ := windows.GetFileType(handle); ft != windows.FILE_TYPE_CHAR {
+		return nil // no console (redirected); nothing to do
+	}
 	var mode uint32
 
 	// Get current console mode
@@ -58,8 +69,8 @@ func EnableMouseInput() error {
 		return fmt.Errorf("GetConsoleMode failed: %w", err)
 	}
 
-	// Enable mouse input and disable quick edit mode
-	newMode := (mode | ENABLE_MOUSE_INPUT) &^ ENABLE_QUICK_EDIT_MODE
+	// Enable mouse input and disable quick edit mode (EXTENDED_FLAGS required)
+	newMode := (mode | ENABLE_MOUSE_INPUT | ENABLE_EXTENDED_FLAGS) &^ ENABLE_QUICK_EDIT_MODE
 	if err := windows.SetConsoleMode(handle, newMode); err != nil {
 		return fmt.Errorf("SetConsoleMode failed: %w", err)
 	}
@@ -69,11 +80,12 @@ func EnableMouseInput() error {
 
 // DisableMouseInput disables mouse input
 func DisableMouseInput() error {
-	handle := windows.Handle(os.Stdout.Fd())
+	handle := handleInput()
 	var mode uint32
 
 	if err := windows.GetConsoleMode(handle, &mode); err != nil {
-		return fmt.Errorf("GetConsoleMode failed: %w", err)
+		// Redirected stdout: GetConsoleMode fails with INVALID_HANDLE; not an error.
+		return nil
 	}
 
 	newMode := mode &^ ENABLE_MOUSE_INPUT
@@ -82,6 +94,18 @@ func DisableMouseInput() error {
 	}
 
 	return nil
+}
+
+func handleInput() windows.Handle {
+	if h, err := windows.GetStdHandle(windows.STD_INPUT_HANDLE); err == nil {
+		if ft, _ := windows.GetFileType(h); ft == windows.FILE_TYPE_CHAR {
+			return h
+		}
+		// Redirected: return handle anyway; callers treat GetConsoleMode
+		// failure as no-console.
+		return h
+	}
+	return windows.Handle(os.Stdout.Fd())
 }
 
 // CheckVTPEnabled returns true if Virtual Terminal Processing is already enabled

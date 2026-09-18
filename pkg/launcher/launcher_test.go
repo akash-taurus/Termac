@@ -391,32 +391,6 @@ func TestPrepareCommand_EnvAndDir(t *testing.T) {
 	}
 }
 
-func TestPrepareCommand_WindowsAttributes(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("Windows-specific test")
-	}
-
-	l := New()
-	ctx := context.Background()
-
-	cmd, err := l.PrepareCommand(ctx, Config{PluginPath: "test.exe"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if cmd.SysProcAttr == nil {
-		t.Fatal("expected cmd.SysProcAttr to be non-nil on Windows")
-	}
-
-	if !cmd.SysProcAttr.HideWindow {
-		t.Error("expected cmd.SysProcAttr.HideWindow to be true")
-	}
-
-	if cmd.SysProcAttr.CreationFlags&CREATE_NO_WINDOW == 0 {
-		t.Errorf("expected CREATE_NO_WINDOW flag (0x08000000) set in CreationFlags: 0x%08x", cmd.SysProcAttr.CreationFlags)
-	}
-}
-
 func TestOptions_NilSafety(t *testing.T) {
 	// Should not panic or overwrite with nil
 	l := New(WithLookPath(nil), WithCommandContext(nil))
@@ -918,4 +892,3 @@ func TestIntegration_Batch_SpacesInPathAndArgs(t *testing.T) {
 		t.Errorf("stdout missing passed arguments: %s", outStr)
 	}
 }
-

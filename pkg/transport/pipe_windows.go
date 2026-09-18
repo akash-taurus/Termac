@@ -40,16 +40,38 @@ func dialPipe(ctx context.Context, pipePath string) (*grpc.ClientConn, error) {
 
 // generatePipePath creates a unique named pipe path with UUID on Windows
 func generatePipePath(prefix string) string {
-	return `\\.\pipe\` + prefix + `_` + generateUUID()
+	if prefix == "" {
+		prefix = "dashboard"
+	}
+	// Windows pipe names are limited (~256 chars); keep prefix short and safe.
+	safe := make([]byte, 0, len(prefix))
+	for i := 0; i < len(prefix) && len(safe) < 32; i++ {
+		c := prefix[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' {
+			safe = append(safe, c)
+		} else {
+			safe = append(safe, '_')
+		}
+	}
+	if len(safe) == 0 {
+		safe = []byte("dashboard")
+	}
+	uuid, err := generateUUID()
+	if err != nil {
+		return `\\.\pipe\` + string(safe) + `_fallback`
+	}
+	return `\\.\pipe\` + string(safe) + `_` + uuid
 }
 
 // generateUUID generates a UUID string using crypto/rand
-func generateUUID() string {
+func generateUUID() (string, error) {
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
 	// Set version (4) and variant bits
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }

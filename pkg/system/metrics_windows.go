@@ -14,10 +14,10 @@ import (
 )
 
 var (
-	modkernel32               = windows.NewLazySystemDLL("kernel32.dll")
-	procGetSystemTimes        = modkernel32.NewProc("GetSystemTimes")
-	procGetLogicalDrives      = modkernel32.NewProc("GetLogicalDrives")
-	procGlobalMemoryStatusEx  = modkernel32.NewProc("GlobalMemoryStatusEx")
+	modkernel32              = windows.NewLazySystemDLL("kernel32.dll")
+	procGetSystemTimes       = modkernel32.NewProc("GetSystemTimes")
+	procGetLogicalDrives     = modkernel32.NewProc("GetLogicalDrives")
+	procGlobalMemoryStatusEx = modkernel32.NewProc("GlobalMemoryStatusEx")
 )
 
 type memoryStatusEx struct {
@@ -84,6 +84,14 @@ func (c *Collector) SampleCPU() (float64, error) {
 		c.prevKernel = curKernel
 		c.prevUser = curUser
 		c.hasPrevTimes = true
+		return 0, nil
+	}
+
+	// Guard against counter going backwards (VM restore/suspend).
+	if curIdle < c.prevIdle || curKernel < c.prevKernel || curUser < c.prevUser {
+		c.prevIdle = curIdle
+		c.prevKernel = curKernel
+		c.prevUser = curUser
 		return 0, nil
 	}
 
@@ -188,6 +196,9 @@ func (c *Collector) SampleDisks() ([]DiskMetrics, error) {
 
 // SampleProcesses captures snapshot of running processes
 func (c *Collector) SampleProcesses(topN int) (int, int, []ProcessInfo, error) {
+	if topN <= 0 || topN > 100 {
+		topN = 10
+	}
 	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
 		return 0, 0, nil, err

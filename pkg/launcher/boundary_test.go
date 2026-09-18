@@ -23,7 +23,7 @@ func TestBoundary_MissingInterpreters(t *testing.T) {
 	t.Run("Python Missing - Exact Error and Sentinels", func(t *testing.T) {
 		customErr := errors.New("underlying lookup failure: file not found in path")
 		l := New(WithLookPath(func(file string) (string, error) {
-			if file == "python" {
+			if file == "python" || file == "python3" || file == "py" {
 				return "", customErr
 			}
 			return "C:\\dummy\\path.exe", nil
@@ -73,7 +73,7 @@ func TestBoundary_MissingInterpreters(t *testing.T) {
 	t.Run("Node Missing - Exact Error and Sentinels", func(t *testing.T) {
 		customErr := errors.New("node not found in PATH")
 		l := New(WithLookPath(func(file string) (string, error) {
-			if file == "node" {
+			if file == "node" || file == "nodejs" {
 				return "", customErr
 			}
 			return "C:\\dummy\\path.exe", nil
@@ -657,4 +657,3 @@ func TestBoundary_CmdQuotingAnomaly(t *testing.T) {
 		}
 	})
 }
-

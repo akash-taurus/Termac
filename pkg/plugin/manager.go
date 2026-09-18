@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,6 +51,8 @@ type Manager struct {
 	pluginsDir string
 	launcher   launcher.Launcher
 	instances  map[string]*PluginInstance
+	// starting guards against concurrent double-StartPlugin for same id.
+	starting map[string]bool
 }
 
 // NewManager creates a new plugin manager
@@ -58,47 +61,81 @@ func NewManager(pluginsDir string) *Manager {
 		pluginsDir: pluginsDir,
 		launcher:   launcher.New(),
 		instances:  make(map[string]*PluginInstance),
+		starting:   make(map[string]bool),
 	}
+}
+
+// copyInstance returns a deep-ish copy (scalars + strings; Cmd/Conn/Client shared pointers but struct itself copied so callers cannot mutate status).
+func copyInstance(src *PluginInstance) *PluginInstance {
+	if src == nil {
+		return nil
+	}
+	cp := *src
+	return &cp
 }
 
 // DiscoverPlugins scans pluginsDir and returns detected plugins
 func (m *Manager) DiscoverPlugins() ([]*PluginInstance, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if strings.TrimSpace(m.pluginsDir) == "" {
+		return nil, fmt.Errorf("plugins directory cannot be empty")
+	}
+	cleanDir := filepath.Clean(m.pluginsDir)
 
-	if err := os.MkdirAll(m.pluginsDir, 0755); err != nil {
+	if err := os.MkdirAll(cleanDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create plugins dir: %w", err)
 	}
 
-	entries, err := os.ReadDir(m.pluginsDir)
+	entries, err := os.ReadDir(cleanDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read plugins dir: %w", err)
 	}
 
+	// Launcher only implements these; .ps1 discovery would always fail at launch.
 	validExts := map[string]bool{
 		".exe": true,
 		".py":  true,
 		".js":  true,
 		".bat": true,
 		".cmd": true,
-		".ps1": true,
 	}
 
+	seen := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
-		ext := stringsToLower(filepath.Ext(entry.Name()))
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
 		if !validExts[ext] {
 			continue
 		}
 
 		id := entry.Name()
+		seen[id] = true
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// GC deleted files: stop + remove stale instances.
+	for id, inst := range m.instances {
+		if !seen[id] {
+			if inst.Conn != nil {
+				_ = inst.Conn.Close()
+			}
+			if inst.Cmd != nil {
+				_ = process.KillCmd(inst.Cmd)
+			}
+			delete(m.instances, id)
+		}
+	}
+
+	for id := range seen {
 		if _, exists := m.instances[id]; !exists {
-			fullPath := filepath.Join(m.pluginsDir, entry.Name())
+			ext := strings.ToLower(filepath.Ext(id))
+			fullPath := filepath.Join(cleanDir, id)
 			m.instances[id] = &PluginInstance{
 				ID:        id,
-				Name:      entry.Name(),
+				Name:      id,
 				Path:      fullPath,
 				Extension: ext,
 				Status:    StatusStopped,
@@ -108,7 +145,7 @@ func (m *Manager) DiscoverPlugins() ([]*PluginInstance, error) {
 
 	list := make([]*PluginInstance, 0, len(m.instances))
 	for _, inst := range m.instances {
-		list = append(list, inst)
+		list = append(list, copyInstance(inst))
 	}
 	return list, nil
 }
@@ -123,74 +160,137 @@ func (m *Manager) StartPlugin(ctx context.Context, id string) error {
 	}
 
 	if inst.Status == StatusRunning && inst.Cmd != nil {
+		if inst.Cmd.ProcessState == nil || !inst.Cmd.ProcessState.Exited() {
+			m.mu.Unlock()
+			return nil
+		}
+		// Stale Running with exited process: fall through and restart.
+	}
+	if m.starting[id] {
 		m.mu.Unlock()
-		return nil
+		return fmt.Errorf("plugin %q is already starting", id)
+	}
+	// If previous run ended in Error but process still alive, kill orphan first.
+	if inst.Cmd != nil && (inst.Cmd.ProcessState == nil || !inst.Cmd.ProcessState.Exited()) && inst.Status == StatusError {
+		_ = process.KillCmd(inst.Cmd)
+		inst.Cmd = nil
+		inst.Conn = nil
+		inst.Client = nil
 	}
 
+	m.starting[id] = true
 	inst.Status = StatusStarting
 	inst.ErrorMsg = ""
 	pipePath := transport.GeneratePipePath(sanitizePrefix(inst.ID))
 	inst.PipePath = pipePath
+	// Capture path before unlocking; do not hold lock across Launch.
+	pluginPath := inst.Path
 	m.mu.Unlock()
 
-	// Launch process with PLUGIN_PIPE environment variable
+	defer func() {
+		m.mu.Lock()
+		delete(m.starting, id)
+		m.mu.Unlock()
+	}()
+
+	// Launch process with PLUGIN_PIPE environment variable (override wins).
 	cfg := launcher.Config{
-		PluginPath: inst.Path,
-		Env:        append(os.Environ(), fmt.Sprintf("PLUGIN_PIPE=%s", pipePath)),
+		PluginPath: pluginPath,
+		Env:        []string{fmt.Sprintf("PLUGIN_PIPE=%s", pipePath)},
 	}
 
 	cmd, err := m.launcher.Launch(ctx, cfg)
 	if err != nil {
 		m.mu.Lock()
-		inst.Status = StatusError
-		inst.ErrorMsg = err.Error()
+		// Only mark error if this start is still current (not stopped concurrently).
+		if cur, ok := m.instances[id]; ok && cur.PipePath == pipePath {
+			cur.Status = StatusError
+			cur.ErrorMsg = err.Error()
+		}
 		m.mu.Unlock()
 		return fmt.Errorf("launch failed: %w", err)
 	}
 
 	m.mu.Lock()
-	inst.Cmd = cmd
+	// If StopPlugin ran while we were launching, kill the orphan and respect Stopped.
+	cur, ok := m.instances[id]
+	if !ok {
+		m.mu.Unlock()
+		_ = process.KillCmd(cmd)
+		return fmt.Errorf("plugin %q removed during start", id)
+	}
+	if cur.Status == StatusStopped {
+		m.mu.Unlock()
+		_ = process.KillCmd(cmd)
+		return fmt.Errorf("plugin %q stopped during start", id)
+	}
+	cur.Cmd = cmd
 	if cmd.Process != nil {
-		inst.PID = cmd.Process.Pid
+		cur.PID = cmd.Process.Pid
 	}
 	m.mu.Unlock()
 
-	// Connect to plugin Named Pipe with retry
-	dialCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
-	defer cancel()
-
+	// Connect with short per-try dials so the retry loop actually iterates.
+	// transport.dialPipe WithBlock would otherwise block the full 4s on first try.
+	deadline := time.Now().Add(4 * time.Second)
 	var conn *grpc.ClientConn
 	for {
-		select {
-		case <-dialCtx.Done():
+		if time.Now().After(deadline) {
+			break
+		}
+		if err := ctx.Err(); err != nil {
 			m.mu.Lock()
-			inst.Status = StatusError
-			inst.ErrorMsg = "timeout dialing plugin named pipe"
-			if inst.Cmd != nil {
-				_ = process.KillCmd(inst.Cmd)
-				inst.Cmd = nil
+			if cur, ok := m.instances[id]; ok && cur.PipePath == pipePath {
+				cur.Status = StatusError
+				cur.ErrorMsg = "start cancelled: " + err.Error()
+				if cur.Cmd != nil {
+					_ = process.KillCmd(cur.Cmd)
+					cur.Cmd = nil
+				}
 			}
 			m.mu.Unlock()
-			return fmt.Errorf("timeout dialing pipe %s", pipePath)
-		default:
-			conn, err = transport.DialPipe(dialCtx, pipePath)
-			if err == nil && conn != nil {
-				goto Connected
-			}
-			time.Sleep(100 * time.Millisecond)
+			return fmt.Errorf("start cancelled: %w", err)
+		}
+		tryCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+		conn, err = transport.DialPipe(tryCtx, pipePath)
+		cancel()
+		if err == nil && conn != nil {
+			goto Connected
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	m.mu.Lock()
+	if cur, ok := m.instances[id]; ok && cur.PipePath == pipePath {
+		cur.Status = StatusError
+		cur.ErrorMsg = "timeout dialing plugin named pipe"
+		if cur.Cmd != nil {
+			_ = process.KillCmd(cur.Cmd)
+			cur.Cmd = nil
 		}
 	}
+	m.mu.Unlock()
+	return fmt.Errorf("timeout dialing pipe %s", pipePath)
 
 Connected:
 	m.mu.Lock()
-	inst.Conn = conn
-	inst.Client = pb.NewWidgetPluginClient(conn)
-	inst.Status = StatusRunning
-	inst.LastUpdated = time.Now()
+	if cur, ok := m.instances[id]; ok && cur.PipePath == pipePath && cur.Status != StatusStopped {
+		cur.Conn = conn
+		cur.Client = pb.NewWidgetPluginClient(conn)
+		cur.Status = StatusRunning
+		cur.LastUpdated = time.Now()
+	} else {
+		m.mu.Unlock()
+		_ = conn.Close()
+		_ = process.KillCmd(cmd)
+		return fmt.Errorf("plugin %q stopped during start", id)
+	}
 	m.mu.Unlock()
 
-	// Immediately request initial data
-	_ = m.FetchAndRender(ctx, id, 80, 24)
+	// Immediately request initial data; surface error but keep Running only on success.
+	if err := m.FetchAndRender(ctx, id, 80, 24); err != nil {
+		return fmt.Errorf("plugin started but initial fetch failed: %w", err)
+	}
 	return nil
 }
 
@@ -222,6 +322,18 @@ func (m *Manager) StopPlugin(id string) error {
 
 // FetchAndRender queries the plugin for state and rendering
 func (m *Manager) FetchAndRender(ctx context.Context, id string, width, height int) error {
+	if width < 1 {
+		width = 80
+	}
+	if width > 1000 {
+		width = 1000
+	}
+	if height < 1 {
+		height = 24
+	}
+	if height > 1000 {
+		height = 1000
+	}
 	m.mu.RLock()
 	inst, exists := m.instances[id]
 	if !exists || inst.Client == nil || inst.Status != StatusRunning {
@@ -229,6 +341,8 @@ func (m *Manager) FetchAndRender(ctx context.Context, id string, width, height i
 		return fmt.Errorf("plugin %s not running", id)
 	}
 	client := inst.Client
+	conn := inst.Conn
+	pipePath := inst.PipePath
 	m.mu.RUnlock()
 
 	callCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -237,8 +351,11 @@ func (m *Manager) FetchAndRender(ctx context.Context, id string, width, height i
 	fetchResp, err := client.FetchData(callCtx, &pb.FetchRequest{PluginId: id})
 	if err != nil {
 		m.mu.Lock()
-		inst.Status = StatusError
-		inst.ErrorMsg = fmt.Sprintf("fetch error: %v", err)
+		// Don't resurrect Error if plugin was stopped concurrently.
+		if cur, ok := m.instances[id]; ok && cur.PipePath == pipePath && cur.Status == StatusRunning && cur.Conn == conn {
+			cur.Status = StatusError
+			cur.ErrorMsg = fmt.Sprintf("fetch error: %v", err)
+		}
 		m.mu.Unlock()
 		return err
 	}
@@ -250,16 +367,20 @@ func (m *Manager) FetchAndRender(ctx context.Context, id string, width, height i
 	})
 	if err != nil {
 		m.mu.Lock()
-		inst.Status = StatusError
-		inst.ErrorMsg = fmt.Sprintf("render error: %v", err)
+		if cur, ok := m.instances[id]; ok && cur.PipePath == pipePath && cur.Status == StatusRunning && cur.Conn == conn {
+			cur.Status = StatusError
+			cur.ErrorMsg = fmt.Sprintf("render error: %v", err)
+		}
 		m.mu.Unlock()
 		return err
 	}
 
 	m.mu.Lock()
-	inst.LastData = fetchResp.GetData()
-	inst.LastRender = renderResp.GetRenderedString()
-	inst.LastUpdated = time.Now()
+	if cur, ok := m.instances[id]; ok && cur.PipePath == pipePath && cur.Status == StatusRunning {
+		cur.LastData = fetchResp.GetData()
+		cur.LastRender = renderResp.GetRenderedString()
+		cur.LastUpdated = time.Now()
+	}
 	m.mu.Unlock()
 
 	return nil
@@ -281,6 +402,7 @@ func (m *Manager) StopAll() {
 			inst.Cmd = nil
 		}
 		inst.Status = StatusStopped
+		inst.PID = 0
 	}
 }
 
@@ -291,7 +413,7 @@ func (m *Manager) ListInstances() []*PluginInstance {
 
 	list := make([]*PluginInstance, 0, len(m.instances))
 	for _, inst := range m.instances {
-		list = append(list, inst)
+		list = append(list, copyInstance(inst))
 	}
 	return list
 }
@@ -309,18 +431,8 @@ func sanitizePrefix(s string) string {
 	if len(b) > 20 {
 		b = b[:20]
 	}
-	return string(b)
-}
-
-func stringsToLower(s string) string {
-	b := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			b[i] = c + ('a' - 'A')
-		} else {
-			b[i] = c
-		}
+	if len(b) == 0 {
+		return "plugin"
 	}
 	return string(b)
 }

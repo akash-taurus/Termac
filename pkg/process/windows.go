@@ -3,12 +3,17 @@
 package process
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 )
 
 const (
@@ -22,11 +27,43 @@ const (
 // taskkillRunner abstracts execution of taskkill to support unit test mocking.
 type taskkillRunner func(pid int) ([]byte, error)
 
+// runTaskkillMu guards runTaskkill against concurrent swap/use data races.
+var runTaskkillMu sync.RWMutex
+
 // runTaskkill is the active taskkill execution function, swappable in unit tests.
 var runTaskkill taskkillRunner = defaultRunTaskkill
 
+// SetTaskkillRunner swaps the runner under lock (test helper to avoid races).
+func SetTaskkillRunner(fn taskkillRunner) {
+	runTaskkillMu.Lock()
+	defer runTaskkillMu.Unlock()
+	runTaskkill = fn
+}
+
+func getTaskkillRunner() taskkillRunner {
+	runTaskkillMu.RLock()
+	defer runTaskkillMu.RUnlock()
+	return runTaskkill
+}
+
+// taskkillPath resolves %SystemRoot%\System32\taskkill.exe to avoid PATH hijack.
+func taskkillPath() string {
+	if sysRoot := os.Getenv("SystemRoot"); sysRoot != "" {
+		abs := filepath.Join(sysRoot, "System32", "taskkill.exe")
+		if _, err := os.Stat(abs); err == nil {
+			return abs
+		}
+	}
+	if p, err := exec.LookPath("taskkill.exe"); err == nil {
+		return p
+	}
+	return "taskkill"
+}
+
 func defaultRunTaskkill(pid int) ([]byte, error) {
-	cmd := exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(pid))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, taskkillPath(), "/F", "/T", "/PID", strconv.Itoa(pid))
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,
 		CreationFlags: CREATE_NO_WINDOW,
@@ -47,17 +84,28 @@ func KillProcessTree(pid int) error {
 		return ErrInvalidPID
 	}
 
-	out, err := runTaskkill(pid)
+	out, err := getTaskkillRunner()(pid)
 	if err != nil {
+		outStr := strings.TrimSpace(string(out))
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			if exitErr.ExitCode() == ExitCodeProcessNotFound {
 				// Process not found or already dead; idempotent success.
 				return nil
 			}
+			// Defense for localized Windows where message differs but
+			// process is already gone. taskkill reports e.g.:
+			// "There is no running instance of the task."
+			lower := strings.ToLower(outStr)
+			if strings.Contains(lower, "not found") || strings.Contains(lower, "not exist") ||
+				strings.Contains(lower, "no running instance") || strings.Contains(lower, "no such process") {
+				return nil
+			}
 		}
-
-		outStr := strings.TrimSpace(string(out))
+		// Context timeout surfaces as context.DeadlineExceeded wrapped by exec.
+		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(outStr, "DeadlineExceeded") {
+			return fmt.Errorf("taskkill timed out for PID %d: %w (%s)", pid, err, outStr)
+		}
 		if outStr != "" {
 			return fmt.Errorf("taskkill failed for PID %d: %w (%s)", pid, err, outStr)
 		}

@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -76,37 +78,53 @@ const (
 
 // DashboardModel is the main Bubble Tea model
 type DashboardModel struct {
-	width           int
-	height          int
-	viewMode        ViewMode
-	repos           []RepoDetail
-	selected        int
-	detailWidth     int
-	spinner         spinner.Model
-	message         string
-	version         string
-	userName        string
-	scanning        bool
-	token           *string
+	width       int
+	height      int
+	viewMode    ViewMode
+	repos       []RepoDetail
+	selected    int
+	// Per-view lists: repos/selected always mirror the ACTIVE view.
+	// Switching tabs stashes the outgoing list and restores the incoming
+	// one, so GitHub login/fetch never wipes the local list (and vice
+	// versa). A nil slot means that view has never been loaded.
+	localRepos     []RepoDetail
+	localSelected  int
+	githubRepos    []RepoDetail
+	githubSelected int
+	detailWidth int
+	spinner     spinner.Model
+	message     string
+	version     string
+	userName    string
+	scanning    bool
+	token       *string
 
 	// Theme
 	themeIndex int
 
 	// GitHub Authentication Modal
-	authModalOpen   bool
-	tokenInput      textinput.Model
-	deviceCode      *auth.DeviceCodeResponse
-	authPolling     bool
-	authError       string
+	authModalOpen bool
+	tokenInput    textinput.Model
+	deviceCode    *auth.DeviceCodeResponse
+	authPolling   bool
+	authError     string
+	// authNeedsPAT is set when the modal was opened because repo
+	// creation/push needs a classic PAT: device-flow login must then be
+	// refused (it can never satisfy the requirement and would loop).
+	authNeedsPAT bool
+	// pendingPublish remembers an n/P publish intent routed through the
+	// auth modal, so [Esc] can resume it with the current token instead
+	// of dropping the user's action.
+	pendingPublish bool
 
 	// System Performance Monitor
 	sysCollector *system.Collector
 	sysSnapshot  system.SystemSnapshot
 
 	// Plugin Manager
-	pluginManager   *plugin.Manager
-	plugins         []*plugin.PluginInstance
-	selectedPlugin  int
+	pluginManager  *plugin.Manager
+	plugins        []*plugin.PluginInstance
+	selectedPlugin int
 
 	// In-Repo Directory & File Explorer
 	explorerMode   bool
@@ -139,9 +157,9 @@ func initialModel() DashboardModel {
 
 	ti := textinput.New()
 	ti.Placeholder = "Paste GitHub PAT (ghp_...) or token here"
-	ti.CharLimit = 120
+	ti.CharLimit = 255
 	ti.Width = 50
-	ti.EchoMode = textinput.EchoNormal
+	ti.EchoMode = textinput.EchoPassword
 
 	fInput := textinput.New()
 	fInput.Placeholder = "Enter or paste directory path (e.g. Z:\\CodeBase\\TUI or .)"
@@ -174,12 +192,20 @@ func initialModel() DashboardModel {
 	mgr := plugin.NewManager(pluginsDir)
 	discovered, _ := mgr.DiscoverPlugins()
 
-	// Check if already authenticated
+	// Check if already authenticated. A stored token is only adopted
+	// when it live-validates: a definitively rejected token (revoked,
+	// expired) must not linger in the model, otherwise every
+	// token-guarded action (push, publish) proceeds with dead
+	// credentials and fails late with confusing errors. When validation
+	// itself errors (offline), the token is kept so the UI does not flap;
+	// each authenticated action re-validates before doing any work.
 	var existingToken *string
 	var existingUser string
 	if tok, err := auth.LoadToken(); err == nil && tok.AccessToken != "" {
-		existingToken = &tok.AccessToken
-		if valid, _ := auth.ValidateToken(tok); valid {
+		if valid, verr := auth.ValidateToken(tok); verr != nil {
+			existingToken = &tok.AccessToken
+		} else if valid {
+			existingToken = &tok.AccessToken
 			client := github.NewClient(existingToken)
 			if u, err := client.GetAuthenticatedUser(); err == nil {
 				existingUser = u.Login
@@ -235,6 +261,9 @@ func initialModel() DashboardModel {
 		viewMode:          ViewLocal,
 		repos:             initialRepos,
 		selected:          selectedIdx,
+		localRepos:        initialRepos,
+		localSelected:     selectedIdx,
+		githubSelected:    0,
 		themeIndex:        0,
 		token:             existingToken,
 		userName:          existingUser,
@@ -463,10 +492,48 @@ type gitActionMsg struct {
 	Err    error
 }
 
-func gitPushCmd(repoPath string) tea.Cmd {
+func gitPushCmd(repoPath, token string) tea.Cmd {
 	return func() tea.Msg {
 		out, err := git.GitPush(repoPath)
-		return gitActionMsg{Action: "push", Repo: repoPath, Output: out, Err: err}
+		if err == nil {
+			return gitActionMsg{Action: "push", Repo: repoPath, Output: out}
+		}
+		if !git.IsGitAuthFailure(out + "\n" + err.Error()) {
+			return gitActionMsg{Action: "push", Repo: repoPath, Output: out, Err: err}
+		}
+		// The remote rejected our credentials. Plain `git push` uses
+		// git's own credential store, so first check the dashboard's
+		// stored token: if it is missing or dead, say so plainly
+		// instead of surfacing raw git stderr.
+		if strings.TrimSpace(token) == "" {
+			return gitActionMsg{Action: "push", Repo: repoPath, Output: out, Err: fmt.Errorf("remote rejected git credentials and no GitHub token is stored (press [l] to log in, or configure git credentials for this remote): %v", err)}
+		}
+		if valid, verr := auth.ValidateToken(&auth.Token{AccessToken: token}); verr != nil {
+			if !errors.Is(verr, auth.ErrRateLimited) {
+				return gitActionMsg{Action: "push", Repo: repoPath, Output: out, Err: fmt.Errorf("remote rejected git credentials and the stored GitHub token could not be verified (%v). Check your connection and retry", verr)}
+			}
+			// Rate-limited: validity unknown, proceed to retry with stored token.
+		} else if !valid {
+			return gitActionMsg{Action: "push", Repo: repoPath, Output: out, Err: fmt.Errorf("remote rejected git credentials and the stored GitHub token is invalid or expired (press [l] to provide a fresh Personal Access Token): %v", err)}
+		}
+		// Stored token is good: retry once over HTTPS with header auth
+		// (SSH remotes cannot use it, so guide instead of retrying).
+		remoteURL, rerr := git.GetRemoteURL(repoPath, "origin")
+		if rerr != nil {
+			return gitActionMsg{Action: "push", Repo: repoPath, Output: out, Err: fmt.Errorf("push rejected and remote origin is unreadable (%v): %v", rerr, err)}
+		}
+		if !strings.HasPrefix(remoteURL, "https://") {
+			return gitActionMsg{Action: "push", Repo: repoPath, Output: out, Err: fmt.Errorf("push rejected over non-HTTPS remote %q (stored GitHub token cannot be applied; check SSH keys or remote permissions): %v", remoteURL, err)}
+		}
+		branch := git.GitBranchName(repoPath)
+		pushOut, pushErr := git.GitPushUpstreamAuth(repoPath, "origin", branch, token)
+		if pushErr != nil {
+			return gitActionMsg{Action: "push", Repo: repoPath, Output: pushOut, Err: fmt.Errorf("push failed even with a valid GitHub token (check collaborator access on this repo): %v", pushErr)}
+		}
+		if strings.TrimSpace(pushOut) == "" {
+			pushOut = "Everything up-to-date"
+		}
+		return gitActionMsg{Action: "push", Repo: repoPath, Output: pushOut}
 	}
 }
 
@@ -497,6 +564,19 @@ func pickFolderCmd() tea.Cmd {
 	}
 }
 
+func openBrowserURL(targetURL string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", targetURL)
+	case "darwin":
+		cmd = exec.Command("open", targetURL)
+	default:
+		cmd = exec.Command("xdg-open", targetURL)
+	}
+	return cmd.Start()
+}
+
 type publishResultMsg struct {
 	Repo   *github.Repo
 	Output string
@@ -506,7 +586,37 @@ type publishResultMsg struct {
 func publishAndPushCmd(token, userName, repoPath, repoName, description string, isPrivate bool) tea.Cmd {
 	return func() tea.Msg {
 		if token == "" {
-			return publishResultMsg{Err: fmt.Errorf("GitHub authentication required. Please press [l] to authenticate first")}
+			return publishResultMsg{Err: fmt.Errorf("GitHub authentication required. Please press [l] to provide a Personal Access Token (PAT)")}
+		}
+		// NOTE: no prefix ban on ghu_/gho_ here. OAuth/device-flow tokens
+		// with 'repo' scope can create repos; scope is checked below when
+		// the API exposes it, and POST /user/repos is attempted otherwise.
+		// A real scope failure surfaces from the API and routes back to
+		// PAT login via publishResultMsg handling.
+		// Live-validate before touching the local repo: a revoked,
+		// expired, or under-scoped token must fail here — not after git
+		// init/commit/branch mutations and a cryptic API error. A plain
+		// GET /user check is not enough: it returns 200 even for tokens
+		// without repo-creation permission, so classic PAT scopes are
+		// inspected via the X-OAuth-Scopes header as well.
+		// Only block when scopes are provably insufficient (non-empty list
+		// missing the needed scope). An empty/unknown list means the API
+		// did not expose scopes — never block on that; POST /user/repos
+		// is the ground truth and its error paths guide to PAT login.
+		scopes, scopesPresent, serr := auth.GetTokenScopes(&auth.Token{AccessToken: token})
+		if serr != nil {
+			if strings.Contains(serr.Error(), "invalid or revoked") || strings.Contains(serr.Error(), "expired") {
+				return publishResultMsg{Err: fmt.Errorf("stored GitHub token is invalid or expired (%v). Please press [l] to provide a fresh Personal Access Token (PAT) with 'repo' scope", serr)}
+			}
+			return publishResultMsg{Err: fmt.Errorf("could not verify GitHub authentication (%v). Check your connection and try again", serr)}
+		}
+		if scopesPresent && len(scopes) > 0 && !auth.HasRepoCreateScope(scopes, isPrivate) {
+			granted := strings.Join(scopes, ", ")
+			need := "'repo'"
+			if !isPrivate {
+				need = "'repo' (or 'public_repo' for a public repository)"
+			}
+			return publishResultMsg{Err: fmt.Errorf("stored GitHub token lacks the required scope to create this repository (granted: %s; needs %s). Please press [l] to provide a classic Personal Access Token with the %s scope", granted, need, need)}
 		}
 		if repoName == "" {
 			repoName = filepath.Base(repoPath)
@@ -527,20 +637,42 @@ func publishAndPushCmd(token, userName, repoPath, repoName, description string, 
 			if authorName == "" {
 				authorName = "User"
 			}
-			_ = exec.Command("git", "config", "user.name", authorName).Run()
-			_ = exec.Command("git", "config", "user.email", authorName+"@users.noreply.github.com").Run()
+			setName := exec.Command("git", "config", "user.name", authorName)
+			setName.Dir = repoPath
+			_ = setName.Run()
+			setEmail := exec.Command("git", "config", "user.email", authorName+"@users.noreply.github.com")
+			setEmail.Dir = repoPath
+			_ = setEmail.Run()
+		}
+
+		// 3. Ensure repository has at least one commit before pushing
+		if !git.GitHasCommits(repoPath) {
+			entries, _ := os.ReadDir(repoPath)
+			hasFiles := false
+			for _, e := range entries {
+				if e.Name() != ".git" {
+					hasFiles = true
+					break
+				}
+			}
+			if !hasFiles {
+				readmePath := filepath.Join(repoPath, "README.md")
+				_ = os.WriteFile(readmePath, []byte(fmt.Sprintf("# %s\n\nCreated with Terminal Dashboard.\n", repoName)), 0644)
+			}
+			_ = git.GitStageAll(repoPath)
+			_, _ = git.GitCommit(repoPath, fmt.Sprintf("Initial commit for %s", repoName))
+		} else {
+			// Commit any pending uncommitted/untracked changes
+			status, err := git.GitStatusDetailed(repoPath)
+			if err == nil && (!status.IsClean || len(status.Files) > 0) {
+				_ = git.GitStageAll(repoPath)
+				_, _ = git.GitCommit(repoPath, fmt.Sprintf("Update files for %s", repoName))
+			}
 		}
 
 		_ = git.GitEnsureBranch(repoPath, "main")
 
-		// 3. Stage all files and commit if there are pending/untracked files
-		status, err := git.GitStatusDetailed(repoPath)
-		if err == nil && (!status.IsClean || len(status.Files) > 0) {
-			_ = git.GitStageAll(repoPath)
-			_, _ = git.GitCommit(repoPath, fmt.Sprintf("Initial commit for %s", repoName))
-		}
-
-		// 4. Create repository on GitHub via API
+		// 4. Create repository on GitHub via API (or connect if already exists)
 		client := github.NewClient(&token)
 		ghRepo, err := client.CreateRepository(github.CreateRepoRequest{
 			Name:        repoName,
@@ -549,7 +681,15 @@ func publishAndPushCmd(token, userName, repoPath, repoName, description string, 
 			AutoInit:    false,
 		})
 		if err != nil {
-			return publishResultMsg{Err: fmt.Errorf("GitHub repository creation failed: %w", err)}
+			if strings.Contains(strings.ToLower(err.Error()), "already exists") {
+				if existing, getErr := client.GetRepository(userName, repoName); getErr == nil {
+					ghRepo = existing
+					err = nil
+				}
+			}
+			if err != nil {
+				return publishResultMsg{Err: fmt.Errorf("GitHub repository creation failed: %w", err)}
+			}
 		}
 
 		// 5. Add or set remote origin
@@ -557,25 +697,19 @@ func publishAndPushCmd(token, userName, repoPath, repoName, description string, 
 			return publishResultMsg{Err: fmt.Errorf("failed to configure remote origin: %w", err)}
 		}
 
-		// 6. Push local commits to remote with authentication
+		// 6. Push local commits to remote with authentication.
+		// Use header-based auth so the token never lands in argv or .git/config.
 		branch := git.GitBranchName(repoPath)
 		if branch == "" {
 			branch = "main"
 		}
 
-		pushURL := ghRepo.CloneURL
-		if strings.HasPrefix(pushURL, "https://") {
-			pushURL = strings.Replace(pushURL, "https://", fmt.Sprintf("https://x-access-token:%s@", token), 1)
-		}
-
-		out, err := git.GitPushUpstream(repoPath, pushURL, branch)
-		// Reset origin in .git/config to clean URL without token
-		_ = git.GitSetRemote(repoPath, "origin", ghRepo.CloneURL)
+		out, err := git.GitPushUpstreamAuth(repoPath, "origin", branch, token)
 
 		if err != nil {
 			return publishResultMsg{
 				Repo: ghRepo,
-				Err:  fmt.Errorf("created repository %s on GitHub, but push failed: %s (%v)", ghRepo.FullName, out, err),
+				Err:  fmt.Errorf("connected repository %s, but push failed: %s (%v)", ghRepo.FullName, out, err),
 			}
 		}
 
@@ -617,7 +751,16 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.authPolling = false
 				m.deviceCode = nil
 				m.authError = ""
+				m.authNeedsPAT = false
 				m.tokenInput.Blur()
+				// Publish was waiting on this modal: continue with the
+				// current session token instead of dropping the action.
+				if m.pendingPublish {
+					m.pendingPublish = false
+					if m.token != nil && m.selected >= 0 && m.selected < len(m.repos) {
+						return m, m.openPublishModal(fmt.Sprintf("Publishing local folder %s to GitHub...", m.repos[m.selected].Name))
+					}
+				}
 				return m, nil
 
 			case "enter":
@@ -629,6 +772,18 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 
+			case "ctrl+o", "ctrl+b":
+				_ = openBrowserURL("https://github.com/settings/tokens/new?scopes=repo,read:org&description=TerminalDashboard")
+				m.message = "Opened browser to create Personal Access Token (PAT)..."
+				return m, nil
+
+			case "b", "B":
+				if m.tokenInput.Value() == "" {
+					_ = openBrowserURL("https://github.com/settings/tokens/new?scopes=repo,read:org&description=TerminalDashboard")
+					m.message = "Opened browser to create Personal Access Token (PAT)..."
+					return m, nil
+				}
+
 			case "c", "C":
 				// Check environment variable
 				if tok, err := auth.LoadToken(); err == nil && tok.AccessToken != "" {
@@ -639,7 +794,13 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 
 			case "d", "D":
-				// Initiate Device Flow
+				// Initiate Device Flow — refused when a PAT is required,
+				// otherwise the user loops: device login can never create repos.
+				if m.authNeedsPAT {
+					m.authError = "Device-flow login cannot create repositories. Press [b] to open the browser token page (scope: repo), paste the classic PAT above, then press [Enter]."
+					m.message = "Personal Access Token (PAT) with 'repo' scope required — device flow cannot create repositories"
+					return m, nil
+				}
 				m.message = "Requesting GitHub device authorization code..."
 				m.authError = ""
 				return m, githubStartDeviceFlowCommand()
@@ -765,7 +926,14 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.publishNameInput.Blur()
 				return m, nil
 
-			case "tab", "v", "V":
+			case "ctrl+l":
+				m.publishModalOpen = false
+				m.publishNameInput.Blur()
+				m.authModalOpen = true
+				m.tokenInput.Focus()
+				return m, nil
+
+			case "tab", "ctrl+p":
 				m.publishPrivate = !m.publishPrivate
 				return m, nil
 
@@ -960,42 +1128,45 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "n", "N":
 			if m.viewMode == ViewLocal && m.selected >= 0 && m.selected < len(m.repos) {
-				if m.token == nil {
-					m.message = "GitHub authentication required to create and push repositories. Please login with [l]."
+				if m.token == nil || !isPAT(*m.token) {
+					if m.token == nil {
+						m.message = "GitHub authentication required to create and push repositories. Please login with [l]."
+					} else {
+						m.message = "A Personal Access Token (PAT) with 'repo' scope is recommended to create repositories. Paste it below, or press [Esc] to continue with the current session token."
+					}
 					m.authModalOpen = true
+					m.authNeedsPAT = true
+					m.pendingPublish = true
 					m.tokenInput.Focus()
 					return m, textinput.Blink
 				}
-				repo := m.repos[m.selected]
-				cleanName := strings.ToLower(strings.ReplaceAll(repo.Name, " ", "-"))
-				m.publishNameInput.SetValue(cleanName)
-				m.publishNameInput.Focus()
-				m.publishModalOpen = true
-				m.publishPrivate = false
-				m.message = fmt.Sprintf("Publishing local folder %s to GitHub...", repo.Name)
-				return m, textinput.Blink
+				return m, m.openPublishModal(fmt.Sprintf("Publishing local folder %s to GitHub...", m.repos[m.selected].Name))
 			}
 
 		case "P":
 			if m.viewMode == ViewLocal && m.selected >= 0 && m.selected < len(m.repos) {
 				repo := m.repos[m.selected]
 				if !git.IsGitRepository(repo.Path) || repo.Remote == "" || repo.Remote == "local" {
-					if m.token == nil {
-						m.message = "No remote configured. Please authenticate with GitHub [l] to create a new remote repo."
+					if m.token == nil || !isPAT(*m.token) {
+						if m.token == nil {
+							m.message = "No remote configured. Please authenticate with GitHub [l] to create a new remote repo."
+						} else {
+							m.message = "A Personal Access Token (PAT) with 'repo' scope is recommended to create repositories. Paste it below, or press [Esc] to continue with the current session token."
+						}
 						m.authModalOpen = true
+						m.authNeedsPAT = true
+						m.pendingPublish = true
 						m.tokenInput.Focus()
 						return m, textinput.Blink
 					}
-					cleanName := strings.ToLower(strings.ReplaceAll(repo.Name, " ", "-"))
-					m.publishNameInput.SetValue(cleanName)
-					m.publishNameInput.Focus()
-					m.publishModalOpen = true
-					m.publishPrivate = false
-					m.message = "No remote repository configured. Set repository details to create and push:"
-					return m, textinput.Blink
+					return m, m.openPublishModal("No remote repository configured. Set repository details to create and push:")
 				}
 				m.message = fmt.Sprintf("Pushing commits for %s to remote...", repo.Name)
-				return m, gitPushCmd(repo.Path)
+				pushToken := ""
+				if m.token != nil {
+					pushToken = *m.token
+				}
+				return m, gitPushCmd(repo.Path, pushToken)
 			}
 
 		case "F":
@@ -1106,25 +1277,30 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
+		// Login / logout work from any view (previously GitHub-tab only,
+		// so pressing [l] on the Local tab silently did nothing).
 		case "l", "L":
-			if m.viewMode == ViewGitHub {
-				m.authModalOpen = true
-				m.tokenInput.Focus()
-				m.tokenInput.Reset()
-				m.authError = ""
-				m.deviceCode = nil
-				return m, textinput.Blink
-			}
+			m.authModalOpen = true
+			m.tokenInput.Focus()
+			m.tokenInput.Reset()
+			m.authError = ""
+			m.deviceCode = nil
+			return m, textinput.Blink
 
 		case "u", "U":
+			_ = auth.DeleteToken()
+			m.token = nil
+			m.userName = ""
+			m.authNeedsPAT = false
+			m.pendingPublish = false
+			m.githubRepos = nil
+			m.githubSelected = 0
 			if m.viewMode == ViewGitHub {
-				_ = auth.DeleteToken()
-				m.token = nil
-				m.userName = ""
 				m.repos = nil
-				m.message = "Logged out from GitHub (token deleted)."
-				return m, nil
+				m.selected = 0
 			}
+			m.message = "Logged out from GitHub (token deleted)."
+			return m, nil
 
 		case "t", "T":
 			m.themeIndex = (m.themeIndex + 1) % len(theme.AvailableThemes)
@@ -1146,23 +1322,37 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "tab":
+			m.stashActiveList()
 			m.viewMode = (m.viewMode + 1) % 4
+			m.restoreList(m.viewMode)
 			return m, m.handleViewChange()
 
 		case "shift+tab":
+			m.stashActiveList()
 			if m.viewMode == 0 {
 				m.viewMode = 3
 			} else {
 				m.viewMode--
 			}
+			m.restoreList(m.viewMode)
 			return m, m.handleViewChange()
 
 		case "1":
+			m.stashActiveList()
 			m.viewMode = ViewLocal
+			if !m.restoreList(ViewLocal) {
+				m.repos = nil
+				m.selected = 0
+			}
 			return m, m.handleViewChange()
 
 		case "2":
+			m.stashActiveList()
 			m.viewMode = ViewGitHub
+			if !m.restoreList(ViewGitHub) {
+				m.repos = nil
+				m.selected = 0
+			}
 			return m, m.handleViewChange()
 
 		case "3":
@@ -1306,8 +1496,29 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.userName = msg.User
 			m.authModalOpen = false
 			m.authPolling = false
+			// Resume the publish flow that required the PAT: keep the local
+			// repo list intact and reopen the publish modal instead of
+			// replacing m.repos with the GitHub remote list (which wiped
+			// the local repo the user was trying to create/push).
+			needsPAT := m.authNeedsPAT
+			// A device-flow result still cannot create repos: keep the
+			// PAT requirement armed so the next publish attempt guides
+			// correctly instead of looping.
+			if msg.Token == nil || !strings.HasPrefix(*msg.Token, "ghu_") {
+				m.authNeedsPAT = false
+			}
+			m.pendingPublish = false
 			m.tokenInput.Blur()
+			m.tokenInput.Reset()
+			if needsPAT {
+				if m.selected >= 0 && m.selected < len(m.repos) {
+					return m, m.openPublishModal(fmt.Sprintf("Authenticated as @%s! Confirm repository name to create & push...", msg.User))
+				}
+				m.message = fmt.Sprintf("Authenticated as @%s! Select a local repo to publish.", msg.User)
+				return m, nil
+			}
 			m.message = fmt.Sprintf("Successfully authenticated as @%s! Fetching repositories...", msg.User)
+			m.viewMode = ViewGitHub
 			return m, githubReposCommand(context.Background(), msg.Token)
 		}
 		m.authError = msg.Err.Error()
@@ -1346,7 +1557,7 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case scanCompleteMsg:
 		m.scanning = false
-		var details []RepoDetail
+		details := []RepoDetail{}
 		for _, r := range msg.repos {
 			info, err := git.GetRepositoryInfo(r.Path)
 			if err != nil {
@@ -1371,10 +1582,16 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				LocalOnly:   true,
 			})
 		}
-		m.repos = details
-		m.selected = 0
+		m.localRepos = details
+		m.localSelected = 0
+		// Only swap into view when the Local tab is active; a scan
+		// finishing while the user is elsewhere must not clobber it.
+		if m.viewMode == ViewLocal {
+			m.repos = details
+			m.selected = 0
+		}
 		m.message = fmt.Sprintf("Found %d local repository(s)", len(details))
-		if len(details) > 0 {
+		if len(details) > 0 && m.viewMode == ViewLocal {
 			return m, repoDetailCommand(context.Background(), details[0])
 		}
 		return m, nil
@@ -1403,7 +1620,7 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.userName = msg.User
-		var details []RepoDetail
+		details := []RepoDetail{}
 		for _, r := range msg.Repos {
 			details = append(details, RepoDetail{
 				Name:      r.FullName,
@@ -1417,8 +1634,15 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				LocalOnly: false,
 			})
 		}
-		m.repos = details
-		m.selected = 0
+		m.githubRepos = details
+		m.githubSelected = 0
+		// Only swap into view when the GitHub tab is active; otherwise
+		// the fetch was triggered from the publish flow and must not
+		// clobber the local list.
+		if m.viewMode == ViewGitHub {
+			m.repos = details
+			m.selected = 0
+		}
 		m.message = fmt.Sprintf("Loaded %d GitHub repository(s) for @%s", len(details), msg.User)
 		return m, nil
 
@@ -1427,13 +1651,22 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.repos[m.selected] = msg.Detail
 			m.detailedGitStatus = msg.GitStatus
 			m.gitLogItems = msg.GitLogs
-			m.message = fmt.Sprintf("Updated: %s", msg.Detail.Name)
+			if m.message == "" || strings.HasPrefix(m.message, "Fetching") || strings.HasPrefix(m.message, "Loading") || strings.HasPrefix(m.message, "Updated:") {
+				m.message = fmt.Sprintf("Updated: %s", msg.Detail.Name)
+			}
 		}
 		return m, nil
 
 	case gitActionMsg:
 		if msg.Err != nil {
 			m.message = fmt.Sprintf("Git %s failed: %v", msg.Action, msg.Err)
+			// Auth-shaped push/pull failures with a token hint should
+			// route to re-login, mirroring the publish error path below.
+			if (msg.Action == "push" || msg.Action == "pull") && (strings.Contains(msg.Err.Error(), "GitHub token") || strings.Contains(msg.Err.Error(), "[l]")) {
+				m.authError = msg.Err.Error()
+				m.authModalOpen = true
+				m.tokenInput.Focus()
+			}
 		} else {
 			if strings.TrimSpace(msg.Output) != "" {
 				firstLine := strings.Split(strings.TrimSpace(msg.Output), "\n")[0]
@@ -1518,7 +1751,16 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case publishResultMsg:
 		if msg.Err != nil {
 			m.message = fmt.Sprintf("Publish error: %v", msg.Err)
+			if strings.Contains(msg.Err.Error(), "token") || strings.Contains(msg.Err.Error(), "Personal Access Token") || strings.Contains(msg.Err.Error(), "PAT") || strings.Contains(msg.Err.Error(), "scope") {
+				m.authError = msg.Err.Error()
+				m.authNeedsPAT = true
+				m.pendingPublish = true
+				m.authModalOpen = true
+				m.tokenInput.Focus()
+			}
+			return m, nil
 		} else {
+			m.pendingPublish = false
 			m.message = fmt.Sprintf("🎉 Successfully created & pushed to GitHub: %s! (%s)", msg.Repo.FullName, msg.Repo.Branch)
 			if m.selected >= 0 && m.selected < len(m.repos) {
 				m.repos[m.selected].Remote = msg.Repo.CloneURL
@@ -1531,6 +1773,58 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// stashActiveList saves the active view's list before switching away.
+func (m *DashboardModel) stashActiveList() {
+	switch m.viewMode {
+	case ViewLocal:
+		m.localRepos = m.repos
+		m.localSelected = m.selected
+	case ViewGitHub:
+		m.githubRepos = m.repos
+		m.githubSelected = m.selected
+	}
+}
+
+// restoreList swaps in the target view's list. Reports whether a stored
+// list existed; callers fall back to fetch/scan when it did not.
+func (m *DashboardModel) restoreList(v ViewMode) bool {
+	switch v {
+	case ViewLocal:
+		if m.localRepos != nil {
+			m.repos = m.localRepos
+			m.selected = m.localSelected
+			return true
+		}
+	case ViewGitHub:
+		if m.githubRepos != nil {
+			m.repos = m.githubRepos
+			m.selected = m.githubSelected
+			return true
+		}
+	}
+	return false
+}
+
+// isPAT reports whether s looks like a PAT usable for repo creation
+// (classic ghp_ or fine-grained github_pat_). Other tokens (device-flow
+// ghu_/gho_, etc.) have unverifiable scopes offline, so creation routes
+// through the auth modal first — [Esc] continues with the current token.
+func isPAT(s string) bool {
+	return strings.HasPrefix(s, "ghp_") || strings.HasPrefix(s, "github_pat_")
+}
+
+// openPublishModal opens the create-and-push modal for the selected repo.
+func (m *DashboardModel) openPublishModal(msg string) tea.Cmd {
+	repo := m.repos[m.selected]
+	cleanName := strings.ToLower(strings.ReplaceAll(repo.Name, " ", "-"))
+	m.publishNameInput.SetValue(cleanName)
+	m.publishNameInput.Focus()
+	m.publishModalOpen = true
+	m.publishPrivate = false
+	m.message = msg
+	return textinput.Blink
 }
 
 func (m *DashboardModel) handleViewChange() tea.Cmd {
@@ -1596,7 +1890,7 @@ func (m DashboardModel) View() string {
 	themePill := lipgloss.NewStyle().
 		Foreground(pal.Highlight).
 		Bold(true).
-		Render("🎨 " + pal.Name) + lipgloss.NewStyle().Foreground(pal.Muted).Render(" [t]")
+		Render("🎨 "+pal.Name) + lipgloss.NewStyle().Foreground(pal.Muted).Render(" [t]")
 
 	var userPill string
 	if m.userName != "" {
@@ -1696,6 +1990,7 @@ func (m DashboardModel) View() string {
 			renderKeyBadge("f / Enter", "Files", pal),
 			renderKeyBadge("e", "GUI Explorer", pal),
 			renderKeyBadge("p", "Terminal", pal),
+			renderKeyBadge("l", "Login", pal),
 			renderKeyBadge("t", "Theme", pal),
 			renderKeyBadge("q", "Quit", pal),
 		}
@@ -1821,14 +2116,15 @@ func renderKeyBadge(key, label string, pal theme.Palette) string {
 }
 
 func (m DashboardModel) renderAuthModal(pal theme.Palette) string {
-	modalWidth := 64
+	modalWidth := 68
 	var b strings.Builder
 
 	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Primary).Render(" 🔐 GitHub Authentication\n\n"))
-	b.WriteString("  Authenticate to view your private repositories, issues, and PRs.\n\n")
+	b.WriteString("  Authenticate to view private repositories, create repos, and push code.\n\n")
 
-	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render("  Option 1: Personal Access Token (PAT)\n"))
-	b.WriteString("  Create token at: https://github.com/settings/tokens (Scope: repo, read:org)\n\n")
+	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render("  Option 1: Personal Access Token (PAT) [Required for Creating Repos]\n"))
+	b.WriteString("  Create token at: https://github.com/settings/tokens (Scope: repo, read:org)\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(pal.Highlight).Bold(true).Render("  👉 Press [b] or [Ctrl+O] to open browser with pre-configured scopes!\n\n"))
 	b.WriteString(fmt.Sprintf("  Token: %s\n\n", m.tokenInput.View()))
 
 	if m.deviceCode != nil {
@@ -1837,8 +2133,9 @@ func (m DashboardModel) renderAuthModal(pal theme.Palette) string {
 		b.WriteString(fmt.Sprintf("    2. Enter Code: %s\n", lipgloss.NewStyle().Bold(true).Foreground(pal.Primary).Render(m.deviceCode.UserCode)))
 		b.WriteString(fmt.Sprintf("    3. Waiting for authorization... %s\n\n", m.spinner.View()))
 	} else {
-		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render("  Option 2: GitHub Device Flow\n"))
-		b.WriteString("  Press [d] to request a browser device verification code.\n\n")
+		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render("  Option 2: GitHub Device Flow (Read-Only / Basic)\n"))
+		b.WriteString("  Press [d] to request a browser device verification code.\n")
+		b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render("  (Note: GitHub Device Flow tokens cannot create repositories on user accounts)\n\n"))
 	}
 
 	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render("  Option 3: Environment Variables\n"))
@@ -1848,7 +2145,11 @@ func (m DashboardModel) renderAuthModal(pal theme.Palette) string {
 		b.WriteString(lipgloss.NewStyle().Foreground(pal.Danger).Bold(true).Render(fmt.Sprintf("  ✖ Error: %s\n\n", m.authError)))
 	}
 
-	b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render("  Controls: [Enter] Submit PAT | [d] Device Flow | [c] Check Env | [Esc] Cancel\n"))
+	b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render("  Controls: [Enter] Submit PAT | [b / Ctrl+O] Open Browser | [d] Device Flow | [Esc] Cancel"))
+	if m.pendingPublish && m.token != nil {
+		b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render(" ([Esc] continues publish with current token)"))
+	}
+	b.WriteString("\n")
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.DoubleBorder()).
@@ -1944,6 +2245,18 @@ func (m DashboardModel) renderPublishModal(pal theme.Palette) string {
 	b.WriteString(fmt.Sprintf("  Local Folder: %s\n\n",
 		lipgloss.NewStyle().Foreground(pal.Highlight).Bold(true).Render(truncPath(repoPath, 50))))
 
+	if m.token != nil && strings.HasPrefix(*m.token, "ghu_") {
+		b.WriteString(lipgloss.NewStyle().Foreground(pal.Warning).Bold(true).Render(
+			"  ⚠️  Notice: Active session uses GitHub Device Flow (ghu_...).\n" +
+				"      If creation fails with a scope error, press [Ctrl+L] to enter a PAT with 'repo' scope.\n\n",
+		))
+	} else if m.token == nil || *m.token == "" {
+		b.WriteString(lipgloss.NewStyle().Foreground(pal.Danger).Bold(true).Render(
+			"  ⚠️  Notice: Not authenticated with GitHub.\n" +
+				"      Press [Ctrl+L] to provide a Personal Access Token (PAT) with 'repo' scope.\n\n",
+		))
+	}
+
 	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render("  Repository Name on GitHub:\n"))
 	b.WriteString(fmt.Sprintf("  %s\n\n", m.publishNameInput.View()))
 
@@ -1956,11 +2269,11 @@ func (m DashboardModel) renderPublishModal(pal theme.Palette) string {
 			lipgloss.NewStyle().Foreground(pal.Muted).Render("  (Anyone on GitHub can see this repository)")
 	}
 	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render("  Visibility: ") + visBadge + "\n")
-	b.WriteString(lipgloss.NewStyle().Foreground(pal.Highlight).Render("  Press [v] or [Tab] to toggle Public / Private\n\n"))
+	b.WriteString(lipgloss.NewStyle().Foreground(pal.Highlight).Render("  Press [Tab] to toggle Public / Private\n\n"))
 
 	targetAccount := "@" + m.userName
 	if m.userName == "" {
-		targetAccount = "Guest (Login with [l])"
+		targetAccount = "Guest (Login with [Ctrl+L])"
 	}
 	b.WriteString(fmt.Sprintf("  Target GitHub Account: %s\n\n", lipgloss.NewStyle().Bold(true).Foreground(pal.Accent).Render(targetAccount)))
 
@@ -1970,7 +2283,7 @@ func (m DashboardModel) renderPublishModal(pal theme.Palette) string {
 	b.WriteString(lipgloss.NewStyle().Foreground(pal.Foreground).Render("    3. Create remote repository via GitHub REST API\n"))
 	b.WriteString(lipgloss.NewStyle().Foreground(pal.Foreground).Render("    4. Connect remote origin & push code (git push -u origin main)\n\n"))
 
-	b.WriteString(lipgloss.NewStyle().Foreground(pal.Highlight).Render("  Controls: [Enter] Create & Push | [v / Tab] Toggle Visibility | [Esc] Cancel\n"))
+	b.WriteString(lipgloss.NewStyle().Foreground(pal.Highlight).Render("  Controls: [Enter] Create & Push | [Tab] Toggle Visibility | [Ctrl+L] Switch Token | [Esc] Cancel\n"))
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.DoubleBorder()).
@@ -2821,26 +3134,28 @@ func trunc(s string, maxLen int) string {
 	if maxLen <= 0 {
 		return ""
 	}
-	if len(s) <= maxLen {
+	r := []rune(s)
+	if len(r) <= maxLen {
 		return s
 	}
 	if maxLen <= 3 {
-		return s[:maxLen]
+		return string(r[:maxLen])
 	}
-	return s[:maxLen-2] + ".."
+	return string(r[:maxLen-2]) + ".."
 }
 
 func truncPath(s string, maxLen int) string {
 	if maxLen <= 0 {
 		return ""
 	}
-	if len(s) <= maxLen {
+	r := []rune(s)
+	if len(r) <= maxLen {
 		return s
 	}
 	if maxLen <= 6 {
-		return s[:maxLen]
+		return string(r[:maxLen])
 	}
-	return "..." + s[len(s)-(maxLen-3):]
+	return "..." + string(r[len(r)-(maxLen-3):])
 }
 
 func renderProgressBar(percent float64, width int, filledColor, emptyColor lipgloss.Color) string {

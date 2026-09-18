@@ -2,8 +2,6 @@
 
 package term
 
-import "fmt"
-
 // EnableWindowsVirtualTerminal is a no-op on non-Windows platforms
 func EnableWindowsVirtualTerminal() error {
 	return nil
@@ -21,5 +19,6 @@ func DisableMouseInput() error {
 
 // CheckVTPEnabled returns false on non-Windows platforms
 func CheckVTPEnabled() bool {
-	return false
+	// ANSI escape sequences are natively supported on POSIX terminals.
+	return true
 }

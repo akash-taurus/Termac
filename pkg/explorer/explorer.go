@@ -67,8 +67,29 @@ func (e *Explorer) Refresh() error {
 	return e.Load(e.CurrentDir)
 }
 
+// ensureInsideRepo rejects paths escaping RepoRoot (traversal, abs, symlink).
+func (e *Explorer) ensureInsideRepo(dirPath string) error {
+	clean := filepath.Clean(dirPath)
+	rel, err := filepath.Rel(e.RepoRoot, clean)
+	if err != nil {
+		return fmt.Errorf("invalid path: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("path escapes repository root")
+	}
+	if eval, err := filepath.EvalSymlinks(clean); err == nil {
+		if rel2, err := filepath.Rel(e.RepoRoot, eval); err != nil || rel2 == ".." || strings.HasPrefix(rel2, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("symlink escapes repository root")
+		}
+	}
+	return nil
+}
+
 // Load reads the contents of the given directory
 func (e *Explorer) Load(dirPath string) error {
+	if err := e.ensureInsideRepo(dirPath); err != nil {
+		return err
+	}
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		return fmt.Errorf("failed to read directory: %w", err)
@@ -154,11 +175,13 @@ func (e *Explorer) GoUp() bool {
 	parent := filepath.Dir(e.CurrentDir)
 	// Guard against navigating above RepoRoot
 	rel, err := filepath.Rel(e.RepoRoot, parent)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return false
 	}
 
-	_ = e.Load(parent)
+	if err := e.Load(parent); err != nil {
+		return false
+	}
 	return true
 }
 
@@ -180,6 +203,16 @@ func (e *Explorer) OpenSelected() (isDir bool, err error) {
 
 // LoadPreview reads up to maxLines of a text file for in-TUI inspection
 func (e *Explorer) LoadPreview(filePath string, maxLines int) error {
+	if err := e.ensureInsideRepo(filepath.Dir(filePath)); err != nil {
+		e.PreviewError = err.Error()
+		return err
+	}
+	if maxLines <= 0 {
+		maxLines = 150
+	}
+	if maxLines > 1000 {
+		maxLines = 1000
+	}
 	file, err := os.Open(filePath)
 	if err != nil {
 		e.PreviewError = err.Error()
@@ -197,7 +230,10 @@ func (e *Explorer) LoadPreview(filePath string, maxLines int) error {
 
 	var lines []string
 	scanner := bufio.NewScanner(file)
+	// Allow long minified lines (default 64KB aborts with false binary error).
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	lineCount := 0
+	totalBytes := 0
 
 	for scanner.Scan() {
 		lineCount++
@@ -205,8 +241,21 @@ func (e *Explorer) LoadPreview(filePath string, maxLines int) error {
 			lines = append(lines, fmt.Sprintf("... (truncated: displaying first %d lines) ...", maxLines))
 			break
 		}
+		text := scanner.Text()
+		// NUL byte => binary.
+		if strings.IndexByte(text, 0) >= 0 {
+			e.PreviewPath = filePath
+			e.PreviewText = "[Binary file or unrecognized encoding]"
+			e.PreviewError = ""
+			return nil
+		}
+		totalBytes += len(text)
+		if totalBytes > 2*1024*1024 {
+			lines = append(lines, "... (truncated: preview size limit) ...")
+			break
+		}
 		// Format line with line number
-		lines = append(lines, fmt.Sprintf("%4d │ %s", lineCount, scanner.Text()))
+		lines = append(lines, fmt.Sprintf("%4d │ %s", lineCount, text))
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -251,8 +300,10 @@ func (e *Explorer) OpenInTerminal() error {
 		return cmd.Start()
 	}
 
-	// Fallback to powershell.exe
-	cmd := exec.Command("cmd.exe", "/c", "start", "powershell.exe", "-NoExit", "-Command", fmt.Sprintf("Set-Location -LiteralPath '%s'", dir))
+	// Fallback to powershell.exe without cmd.exe wrapper to avoid injection.
+	// Single-quote escape for PowerShell: ' -> ''.
+	safe := strings.ReplaceAll(dir, "'", "''")
+	cmd := exec.Command("powershell.exe", "-NoExit", "-Command", fmt.Sprintf("Set-Location -LiteralPath '%s'", safe))
 	return cmd.Start()
 }
 
@@ -263,19 +314,49 @@ func (e *Explorer) OpenInVSCode() error {
 		target = e.Entries[e.Selected].Path
 	}
 
-	cmd := exec.Command("cmd.exe", "/c", "code", target)
+	if _, err := exec.LookPath("code"); err != nil {
+		return fmt.Errorf("VS Code (code) not found in PATH: %w", err)
+	}
+	cmd := exec.Command("code", target)
 	return cmd.Start()
+}
+
+// validateSingleName rejects traversal, separators, absolute and reserved names.
+func validateSingleName(name string) error {
+	if name == "" {
+		return fmt.Errorf("name cannot be empty")
+	}
+	if filepath.IsAbs(name) || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
+		return fmt.Errorf("invalid name %q", name)
+	}
+	if filepath.Clean(name) != name {
+		return fmt.Errorf("invalid name %q", name)
+	}
+	// Windows reserved device names.
+	upper := strings.ToUpper(name)
+	if i := strings.IndexByte(upper, '.'); i >= 0 {
+		upper = upper[:i]
+	}
+	switch upper {
+	case "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
+		return fmt.Errorf("reserved name %q", name)
+	}
+	return nil
 }
 
 // CreateDirectory creates a sub-directory in CurrentDir
 func (e *Explorer) CreateDirectory(name string) error {
 	name = strings.TrimSpace(name)
-	if name == "" {
-		return fmt.Errorf("directory name cannot be empty")
+	if err := validateSingleName(name); err != nil {
+		return err
 	}
 
 	target := filepath.Join(e.CurrentDir, name)
-	if err := os.MkdirAll(target, 0755); err != nil {
+	if err := e.ensureInsideRepo(target); err != nil {
+		return err
+	}
+	if err := os.Mkdir(target, 0755); err != nil {
 		return err
 	}
 
@@ -285,11 +366,14 @@ func (e *Explorer) CreateDirectory(name string) error {
 // CreateFile creates a new file in CurrentDir
 func (e *Explorer) CreateFile(name string) error {
 	name = strings.TrimSpace(name)
-	if name == "" {
-		return fmt.Errorf("filename cannot be empty")
+	if err := validateSingleName(name); err != nil {
+		return err
 	}
 
 	target := filepath.Join(e.CurrentDir, name)
+	if err := e.ensureInsideRepo(target); err != nil {
+		return err
+	}
 	f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
@@ -306,6 +390,9 @@ func (e *Explorer) DeleteSelected() error {
 	}
 
 	target := e.Entries[e.Selected].Path
+	if err := e.ensureInsideRepo(target); err != nil {
+		return fmt.Errorf("refusing to delete outside repository: %w", err)
+	}
 	if err := os.RemoveAll(target); err != nil {
 		return err
 	}
@@ -332,6 +419,13 @@ func HumanSize(bytes uint64) string {
 	for n := bytes / unit; n >= unit; n /= unit {
 		div *= unit
 		exp++
+		if exp >= 5 {
+			break
+		}
 	}
-	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+	units := "KMGTPE"
+	if exp >= len(units) {
+		exp = len(units) - 1
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), units[exp])
 }

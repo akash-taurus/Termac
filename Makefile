@@ -14,16 +14,16 @@ build: build-windows
 
 build-windows: ## Build for Windows (native)
 	@echo "Building $(APP_NAME) v$(VERSION) for Windows..."
-	go mod tidy
 	go vet ./...
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X main.version=$(VERSION)" -o $(OUTPUT_DIR)/$(APP_NAME).exe $(BUILD_DIR)
+	mkdir -p $(OUTPUT_DIR)
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X main.version=$(VERSION)" -o $(OUTPUT_DIR)/$(APP_NAME).exe ./cmd/$(APP_NAME)
 	@echo "Build complete: $(OUTPUT_DIR)/$(APP_NAME).exe"
 
 build-linux: ## Build for Linux
 	@echo "Building $(APP_NAME) v$(VERSION) for Linux..."
-	go mod tidy
 	go vet ./...
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=$(VERSION)" -o dist/linux/$(APP_NAME) $(BUILD_DIR)
+	mkdir -p dist/linux
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=$(VERSION)" -o dist/linux/$(APP_NAME) ./cmd/$(APP_NAME)
 
 test: ## Run tests
 	go test ./... -v
@@ -32,6 +32,7 @@ vet: ## Run go vet
 	go vet ./...
 
 clean: ## Clean build artifacts
+	go clean
 	rm -rf dist/
 	@echo "Cleaned build artifacts"
 

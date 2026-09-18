@@ -14,10 +14,20 @@ type Address struct {
 }
 
 // String returns the string representation
-func (a *Address) String() string { return a.Path }
+func (a *Address) String() string {
+	if a == nil {
+		return ""
+	}
+	return a.Path
+}
 
 // Network returns the network type
-func (a *Address) Network() string { return "npipe" }
+func (a *Address) Network() string {
+	if a == nil {
+		return ""
+	}
+	return "npipe"
+}
 
 // PipeServer is a gRPC server backed by a named pipe
 type PipeServer struct {

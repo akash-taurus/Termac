@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -13,9 +14,9 @@ const appName = "Dashboard"
 
 // Config represents the full dashboard configuration
 type Config struct {
-	Version    string     `yaml:"version"`
-	Git        GitConfig  `yaml:"git"`
-	Appearance Theme      `yaml:"appearance"`
+	Version    string    `yaml:"version"`
+	Git        GitConfig `yaml:"git"`
+	Appearance Theme     `yaml:"appearance"`
 }
 
 // GitConfig contains Git and GitHub authentication settings
@@ -28,18 +29,23 @@ type GitConfig struct {
 
 // Theme represents the UI theme configuration
 type Theme struct {
-	PrimaryColor  string `yaml:"primary_color"`
-	AccentColor   string `yaml:"accent_color"`
-	Font          string `yaml:"font"`
-	ColorDepth    int    `yaml:"color_depth"`
+	PrimaryColor string `yaml:"primary_color"`
+	AccentColor  string `yaml:"accent_color"`
+	Font         string `yaml:"font"`
+	ColorDepth   int    `yaml:"color_depth"`
 }
 
 // DefaultConfig returns a new default configuration
 func DefaultConfig() *Config {
+	tokenPath := filepath.Join(appName, "github_token.json")
+	// Resolve to absolute config dir when available; fall back to relative.
+	if base, err := os.UserConfigDir(); err == nil {
+		tokenPath = filepath.Join(base, appName, "github_token.json")
+	}
 	return &Config{
 		Version: "1.0.0",
 		Git: GitConfig{
-			TokenPath: filepath.Join(appName, "github_token.json"),
+			TokenPath: tokenPath,
 		},
 		Appearance: Theme{
 			PrimaryColor: "6",
@@ -48,6 +54,22 @@ func DefaultConfig() *Config {
 			ColorDepth:   24,
 		},
 	}
+}
+
+// Validate checks color depth and required fields.
+func (c *Config) Validate() error {
+	if c == nil {
+		return fmt.Errorf("config is nil")
+	}
+	switch c.Appearance.ColorDepth {
+	case 0, 8, 24, 32:
+	default:
+		return fmt.Errorf("invalid color_depth %d (want 8, 24 or 32)", c.Appearance.ColorDepth)
+	}
+	if strings.TrimSpace(c.Version) == "" {
+		return fmt.Errorf("version cannot be empty")
+	}
+	return nil
 }
 
 // ConfigPath returns the absolute path to the dashboard configuration file.
@@ -126,7 +148,7 @@ func GetGitHubClientID() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return string(data), nil
+	return strings.TrimSpace(string(data)), nil
 }
 
 // SaveGitHubClientID stores the GitHub OAuth client ID
@@ -135,8 +157,11 @@ func SaveGitHubClientID(id string) error {
 	if err != nil {
 		return err
 	}
+	if err := os.MkdirAll(filepath.Join(base, appName), 0700); err != nil {
+		return err
+	}
 	path := filepath.Join(base, appName, "github_client_id")
-	return os.WriteFile(path, []byte(id), 0600)
+	return os.WriteFile(path, []byte(strings.TrimSpace(id)), 0600)
 }
 
 // GetLastLogin returns the timestamp of the last GitHub login
@@ -150,13 +175,20 @@ func GetLastLogin() (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
-	return time.Parse(time.RFC3339, string(data))
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(string(data)))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("corrupt last_login: %w", err)
+	}
+	return t, nil
 }
 
 // SaveLastLogin stores the current time as the last login timestamp
 func SaveLastLogin() error {
 	base, err := os.UserConfigDir()
 	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(base, appName), 0700); err != nil {
 		return err
 	}
 	path := filepath.Join(base, appName, "last_login")

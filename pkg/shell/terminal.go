@@ -77,13 +77,13 @@ func RegisterTerminalProfile(exePath, iconPath string) error {
 	}
 
 	newProfile := map[string]interface{}{
-		"guid":            profileGuid,
-		"name":            "Terminal Dashboard",
-		"commandline":     exePath,
-		"icon":            iconPath,
+		"guid":              profileGuid,
+		"name":              "Terminal Dashboard",
+		"commandline":       exePath,
+		"icon":              iconPath,
 		"startingDirectory": "%USERPROFILE%",
-		"colorScheme":     "Campbell",
-		"hidden":          false,
+		"colorScheme":       "Campbell",
+		"hidden":            false,
 	}
 
 	profilesRaw["list"] = append(list, newProfile)

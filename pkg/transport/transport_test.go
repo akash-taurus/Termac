@@ -9,18 +9,23 @@ import (
 
 func TestGeneratePipePath(t *testing.T) {
 	path := GeneratePipePath("dashboard_plugin")
-	
+
 	// Should contain the prefix
 	if !strings.Contains(path, "dashboard_plugin") {
 		t.Errorf("expected path to contain prefix, got %q", path)
 	}
-	
+
 	// On Windows, should be a named pipe path
 	// On other platforms, should be a TCP address
 	if strings.HasPrefix(path, `\\.\pipe\`) {
-		// Windows: validate named pipe format
-		if !strings.HasSuffix(path, `_`+generateUUID()) && len(path) <= len(`\\.\pipe\dashboard_plugin_`) {
-			t.Errorf("expected Windows named pipe with UUID, got %q", path)
+		// Windows: validate named pipe format \\.\pipe\<prefix>_<uuid>.
+		// Must be longer than the bare prefix and contain a non-empty
+		// unique suffix after the final underscore.
+		const prefix = `\\.\pipe\dashboard_plugin_`
+		if !strings.HasPrefix(path, prefix) || len(path) <= len(prefix) {
+			t.Errorf("expected Windows named pipe with UUID suffix, got %q", path)
+		} else if idx := strings.LastIndex(path, "_"); idx < 0 || idx+1 >= len(path) {
+			t.Errorf("expected non-empty UUID suffix after underscore, got %q", path)
 		}
 	} else if strings.HasPrefix(path, "127.0.0.1:") {
 		// Non-Windows: TCP fallback
@@ -71,7 +76,7 @@ func TestListenPipe_DialPipe_RoundTrip(t *testing.T) {
 
 func TestPipeServer_Lifecycle(t *testing.T) {
 	pipePath := GeneratePipePath("test_lifecycle")
-	
+
 	ps, err := NewPipeServer(pipePath)
 	if err != nil {
 		t.Fatalf("NewPipeServer failed: %v", err)
@@ -108,7 +113,7 @@ func TestNewPipeServer_ErrorHandling(t *testing.T) {
 func TestTransport_Interface(t *testing.T) {
 	// Verify Address implements net.Addr interface
 	var _ net.Addr = (*Address)(nil)
-	
+
 	addr := &Address{Path: `\\.\pipe\test`}
 	if addr.Network() != "npipe" {
 		t.Errorf("Address.Network() = %q, want npipe", addr.Network())

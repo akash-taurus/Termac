@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
-const (
+var (
 	apiBaseURL = "https://api.github.com"
 	userAgent  = "TerminalDashboard/1.0.0"
 )
@@ -41,8 +43,9 @@ type oauthTransport struct {
 }
 
 func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	req.Header.Set("Authorization", "token "+t.token)
+	req.Header.Set("Authorization", "Bearer "+t.token)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("User-Agent", userAgent)
 	return http.DefaultTransport.RoundTrip(req)
 }
@@ -159,7 +162,7 @@ func (c *GitHubClient) GetRepositories(page, perPage int) ([]Repo, error) {
 
 // GetRepository gets a single repository by full name
 func (c *GitHubClient) GetRepository(owner, repo string) (*Repo, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s", apiBaseURL, owner, repo)
+	url := fmt.Sprintf("%s/repos/%s/%s", apiBaseURL, url.PathEscape(owner), url.PathEscape(repo))
 	body, err := c.get(url)
 	if err != nil {
 		return nil, err
@@ -174,7 +177,7 @@ func (c *GitHubClient) GetRepository(owner, repo string) (*Repo, error) {
 
 // GetBranches lists branches for a repository
 func (c *GitHubClient) GetBranches(owner, repo string) ([]Branch, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/branches", apiBaseURL, owner, repo)
+	url := fmt.Sprintf("%s/repos/%s/%s/branches", apiBaseURL, url.PathEscape(owner), url.PathEscape(repo))
 	body, err := c.get(url)
 	if err != nil {
 		return nil, err
@@ -189,7 +192,7 @@ func (c *GitHubClient) GetBranches(owner, repo string) ([]Branch, error) {
 
 // GetCommits lists commits for a repository
 func (c *GitHubClient) GetCommits(owner, repo string, page int) ([]Commit, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/commits?page=%d&per_page=10", apiBaseURL, owner, repo, page)
+	url := fmt.Sprintf("%s/repos/%s/%s/commits?page=%d&per_page=10", apiBaseURL, url.PathEscape(owner), url.PathEscape(repo), page)
 	body, err := c.get(url)
 	if err != nil {
 		return nil, err
@@ -204,7 +207,7 @@ func (c *GitHubClient) GetCommits(owner, repo string, page int) ([]Commit, error
 
 // GetPullRequests lists pull requests for a repository
 func (c *GitHubClient) GetPullRequests(owner, repo string) ([]PullRequest, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/pulls?state=open&per_page=20", apiBaseURL, owner, repo)
+	url := fmt.Sprintf("%s/repos/%s/%s/pulls?state=open&per_page=20", apiBaseURL, url.PathEscape(owner), url.PathEscape(repo))
 	body, err := c.get(url)
 	if err != nil {
 		return nil, err
@@ -224,7 +227,7 @@ func (c *GitHubClient) GetRepositoryPRs(owner, repo string) ([]PullRequest, erro
 
 // SearchRepositories searches GitHub repositories
 func (c *GitHubClient) SearchRepositories(query string, page int) ([]Repo, error) {
-	url := fmt.Sprintf("%s/search/repositories?q=%s&page=%d&per_page=20&sort=stars", apiBaseURL, query, page)
+	url := fmt.Sprintf("%s/search/repositories?q=%s&page=%d&per_page=20&sort=stars", apiBaseURL, url.QueryEscape(query), page)
 	body, err := c.get(url)
 	if err != nil {
 		return nil, err
@@ -254,7 +257,16 @@ func (c *GitHubClient) get(url string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+
 	if resp.StatusCode == 404 {
+		// 404 may mean not-found OR no permission; surface body for context.
+		if len(body) > 0 {
+			return nil, fmt.Errorf("resource not found: %s", truncateBody(body))
+		}
 		return nil, fmt.Errorf("resource not found")
 	}
 	if resp.StatusCode == 401 {
@@ -264,22 +276,31 @@ func (c *GitHubClient) get(url string) ([]byte, error) {
 		return nil, fmt.Errorf("forbidden - rate limit exceeded or insufficient permissions")
 	}
 	if resp.StatusCode >= 400 {
+		if len(body) > 0 {
+			return nil, fmt.Errorf("API error: status %d: %s", resp.StatusCode, truncateBody(body))
+		}
 		return nil, fmt.Errorf("API error: status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
 	}
 
 	return body, nil
 }
 
+func truncateBody(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	if len(s) > 500 {
+		return s[:500] + "..."
+	}
+	return s
+}
+
 // GetBranchProtection checks if a branch has protection enabled
 func (c *GitHubClient) GetBranchProtection(owner, repo, branch string) (bool, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/branches/%s/protection", apiBaseURL, owner, repo, branch)
+	url := fmt.Sprintf("%s/repos/%s/%s/branches/%s/protection", apiBaseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(branch))
 	_, err := c.get(url)
 	if err != nil {
+		if strings.Contains(err.Error(), "resource not found") {
+			return false, nil
+		}
 		return false, err
 	}
 	return true, nil
@@ -287,7 +308,7 @@ func (c *GitHubClient) GetBranchProtection(owner, repo, branch string) (bool, er
 
 // GetRepoCommit gets a specific commit
 func (c *GitHubClient) GetRepoCommit(owner, repo, sha string) (*Commit, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/commits/%s", apiBaseURL, owner, repo, sha)
+	url := fmt.Sprintf("%s/repos/%s/%s/commits/%s", apiBaseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(sha))
 	body, err := c.get(url)
 	if err != nil {
 		return nil, err
@@ -312,7 +333,7 @@ func (c *GitHubClient) GetRepoCommit(owner, repo, sha string) (*Commit, error) {
 
 // GetRepoCommits gets commits for a repository with pagination
 func (c *GitHubClient) GetRepoCommits(owner, repo string, page int) ([]Commit, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/commits?page=%d&per_page=10", apiBaseURL, owner, repo, page)
+	url := fmt.Sprintf("%s/repos/%s/%s/commits?page=%d&per_page=10", apiBaseURL, url.PathEscape(owner), url.PathEscape(repo), page)
 	body, err := c.get(url)
 	if err != nil {
 		return nil, err
@@ -368,6 +389,18 @@ type CreateRepoRequest struct {
 
 // CreateRepository creates a new repository on GitHub for the authenticated user
 func (c *GitHubClient) CreateRepository(req CreateRepoRequest) (*Repo, error) {
+	if strings.TrimSpace(req.Name) == "" {
+		return nil, fmt.Errorf("repository name cannot be empty")
+	}
+	if len(req.Name) > 100 {
+		return nil, fmt.Errorf("repository name too long")
+	}
+	for _, r := range req.Name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return nil, fmt.Errorf("invalid repository name %q", req.Name)
+	}
 	url := apiBaseURL + "/user/repos"
 	body, err := c.post(url, req)
 	if err != nil {
@@ -402,7 +435,7 @@ func (c *GitHubClient) post(url string, payload interface{}) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
 	}
@@ -415,10 +448,21 @@ func (c *GitHubClient) post(url string, payload interface{}) ([]byte, error) {
 			} `json:"errors"`
 		}
 		if err := json.Unmarshal(body, &ghErr); err == nil && ghErr.Message != "" {
+			if strings.Contains(strings.ToLower(ghErr.Message), "resource not accessible by integration") {
+				return nil, fmt.Errorf("GitHub token lacks 'repo' creation scope (Device Flow tokens cannot create repositories). Please provide a Personal Access Token (PAT) with 'repo' scope (press [l])")
+			}
 			if len(ghErr.Errors) > 0 && ghErr.Errors[0].Message != "" {
 				return nil, fmt.Errorf("%s: %s", ghErr.Message, ghErr.Errors[0].Message)
 			}
+			// 403/404 on creation almost always means insufficient token
+			// scope (GitHub may answer 404 to avoid leaking repo existence).
+			if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
+				return nil, fmt.Errorf("%s (HTTP %d — the token likely lacks the 'repo' scope; press [l] to log in with a classic Personal Access Token that has it)", ghErr.Message, resp.StatusCode)
+			}
 			return nil, fmt.Errorf("%s", ghErr.Message)
+		}
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("GitHub API error (%d) creating repository — the token likely lacks the 'repo' scope (press [l] to log in with a classic Personal Access Token that has it)", resp.StatusCode)
 		}
 		return nil, fmt.Errorf("GitHub API error (%d): %s", resp.StatusCode, string(body))
 	}

@@ -27,7 +27,7 @@ const (
 	JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 
 	// Process access rights needed to assign a process to a job object.
-	processSetQuota = 0x0100
+	processSetQuota  = 0x0100
 	processTerminate = 0x0001
 )
 
@@ -53,7 +53,7 @@ type jobObjectBasicLimitInformation struct {
 }
 
 type jobObjectExtendedLimitInformation struct {
-	BasicLimitInformation jobObjectBasicLimitInformation
+	BasicLimitInformation  jobObjectBasicLimitInformation
 	IoInfo                 ioCounters
 	ProcessMemoryLimit     uintptr
 	JobMemoryLimit         uintptr
