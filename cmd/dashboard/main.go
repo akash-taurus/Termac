@@ -688,7 +688,9 @@ func publishAndPushCmd(token, userName, repoPath, repoName, description string, 
 				}
 			}
 			if err != nil {
-				return publishResultMsg{Err: fmt.Errorf("GitHub repository creation failed: %w", err)}
+				// Name only the token TYPE (prefix), never the secret, so
+				// the user can tell which stored credential was used.
+				return publishResultMsg{Err: fmt.Errorf("GitHub repository creation failed (active token: %s): %w", describeTokenType(token), err)}
 			}
 		}
 
@@ -1805,6 +1807,27 @@ func (m *DashboardModel) restoreList(v ViewMode) bool {
 		}
 	}
 	return false
+}
+
+// describeTokenType names the credential family from its prefix only.
+// It never includes secret material, so it is safe to show in errors.
+func describeTokenType(token string) string {
+	switch {
+	case strings.HasPrefix(token, "ghp_"):
+		return "classic PAT (ghp_...)"
+	case strings.HasPrefix(token, "github_pat_"):
+		return "fine-grained PAT (github_pat_...)"
+	case strings.HasPrefix(token, "ghu_"):
+		return "device-flow user token (ghu_...)"
+	case strings.HasPrefix(token, "gho_"):
+		return "OAuth token (gho_...)"
+	case strings.HasPrefix(token, "ghs_"):
+		return "GitHub App token (ghs_...)"
+	case strings.TrimSpace(token) == "":
+		return "none"
+	default:
+		return "unrecognized format"
+	}
 }
 
 // isPAT reports whether s looks like a PAT usable for repo creation

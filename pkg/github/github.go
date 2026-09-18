@@ -449,7 +449,7 @@ func (c *GitHubClient) post(url string, payload interface{}) ([]byte, error) {
 		}
 		if err := json.Unmarshal(body, &ghErr); err == nil && ghErr.Message != "" {
 			if strings.Contains(strings.ToLower(ghErr.Message), "resource not accessible by integration") {
-				return nil, fmt.Errorf("GitHub token lacks 'repo' creation scope (Device Flow tokens cannot create repositories). Please provide a Personal Access Token (PAT) with 'repo' scope (press [l])")
+				return nil, fmt.Errorf("GitHub refused repository creation (%s). What works depends on token type: a classic PAT needs the 'repo' scope; a fine-grained PAT needs Administration account permission (read and write); GitHub App / device-flow tokens cannot create user repositories. Press [l] to switch tokens", ghErr.Message)
 			}
 			if len(ghErr.Errors) > 0 && ghErr.Errors[0].Message != "" {
 				return nil, fmt.Errorf("%s: %s", ghErr.Message, ghErr.Errors[0].Message)
