@@ -202,9 +202,7 @@ func initialModel() DashboardModel {
 	var existingToken *string
 	var existingUser string
 	if tok, err := auth.LoadToken(); err == nil && tok.AccessToken != "" {
-		if valid, verr := auth.ValidateToken(tok); verr != nil {
-			existingToken = &tok.AccessToken
-		} else if valid {
+		if valid, verr := auth.ValidateToken(tok); verr == nil && valid {
 			existingToken = &tok.AccessToken
 			client := github.NewClient(existingToken)
 			if u, err := client.GetAuthenticatedUser(); err == nil {
@@ -1917,10 +1915,28 @@ func (m DashboardModel) View() string {
 
 	var userPill string
 	if m.userName != "" {
+		// Show the active credential family next to the user so a stale
+		// stored token (e.g. device-flow) is visible at a glance instead
+		// of surfacing only when creation fails.
+		credTag := ""
+		if m.token != nil {
+			switch {
+			case strings.HasPrefix(*m.token, "ghp_"):
+				credTag = " [classic PAT]"
+			case strings.HasPrefix(*m.token, "github_pat_"):
+				credTag = " [fine-grained PAT]"
+			case strings.HasPrefix(*m.token, "ghu_"), strings.HasPrefix(*m.token, "gho_"):
+				credTag = " [device-flow]"
+			case strings.HasPrefix(*m.token, "ghs_"):
+				credTag = " [GitHub App]"
+			default:
+				credTag = " [custom token]"
+			}
+		}
 		userPill = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(pal.Success).
-			Render("● @" + m.userName)
+			Render("● @" + m.userName+credTag)
 	} else {
 		userPill = lipgloss.NewStyle().
 			Foreground(pal.Muted).
@@ -2143,7 +2159,12 @@ func (m DashboardModel) renderAuthModal(pal theme.Palette) string {
 	var b strings.Builder
 
 	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Primary).Render(" 🔐 GitHub Authentication\n\n"))
-	b.WriteString("  Authenticate to view private repositories, create repos, and push code.\n\n")
+	b.WriteString("  Authenticate to view private repositories, create repos, and push code.\n")
+	if m.token != nil && strings.TrimSpace(*m.token) != "" {
+		b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render(
+			fmt.Sprintf("  Currently stored: %s (as @%s). Pasting a new token below replaces it.\n", describeTokenType(*m.token), m.userName)))
+	}
+	b.WriteString("\n")
 
 	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render("  Option 1: Personal Access Token (PAT) [Required for Creating Repos]\n"))
 	b.WriteString("  Create token at: https://github.com/settings/tokens (Scope: repo, read:org)\n")
