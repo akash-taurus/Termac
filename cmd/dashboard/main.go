@@ -785,10 +785,22 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 			case "c", "C":
-				// Check environment variable
-				if tok, err := auth.LoadToken(); err == nil && tok.AccessToken != "" {
-					m.message = "Verifying token from environment..."
-					return m, githubSubmitTokenCommand(tok.AccessToken)
+				// Check environment first so a freshly exported PAT always
+				// wins over a stale stored token. Paste works reliably in
+				// PowerShell itself, unlike inside the TUI input where the
+				// terminal may swallow the paste chord (Ctrl+V).
+				if envTok := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); envTok != "" {
+					m.message = "Verifying GITHUB_TOKEN from environment..."
+					return m, githubSubmitTokenCommand(envTok)
+				}
+				if envTok := strings.TrimSpace(os.Getenv("GH_TOKEN")); envTok != "" {
+					m.message = "Verifying GH_TOKEN from environment..."
+					return m, githubSubmitTokenCommand(envTok)
+				}
+				// Fall back to validating whatever is already stored.
+				if tok, err := auth.LoadToken(); err == nil && strings.TrimSpace(tok.AccessToken) != "" {
+					m.message = "Verifying stored token..."
+					return m, githubSubmitTokenCommand(strings.TrimSpace(tok.AccessToken))
 				}
 				m.authError = "No GITHUB_TOKEN or GH_TOKEN found in environment"
 				return m, nil
@@ -2182,8 +2194,9 @@ func (m DashboardModel) renderAuthModal(pal theme.Palette) string {
 		b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render("  (Note: GitHub Device Flow tokens cannot create repositories on user accounts)\n\n"))
 	}
 
-	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render("  Option 3: Environment Variables\n"))
-	b.WriteString("  Press [c] to check and import GITHUB_TOKEN or GH_TOKEN.\n\n")
+	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render("  Option 3: Environment Variables (most reliable paste path)\n"))
+	b.WriteString("  In PowerShell run:  $env:GITHUB_TOKEN=\"<paste PAT here>\"\n")
+	b.WriteString("  Then press [c] to check and import it.\n\n")
 
 	if m.authError != "" {
 		b.WriteString(lipgloss.NewStyle().Foreground(pal.Danger).Bold(true).Render(fmt.Sprintf("  ✖ Error: %s\n\n", m.authError)))
