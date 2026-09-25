@@ -251,8 +251,26 @@ With the changed-files list visible:
 | `Ctrl+A` | Abort the in-progress merge/rebase (confirmed) |
 | `Ctrl+G` | Reflog overlay — `Enter` checks out the highlighted state |
 | `Ctrl+F` | `git fetch --all --prune` |
+| `Ctrl+P` | **Create PR from current branch** (see below) |
 
 In the **commit log pane** (`g`): `j`/`k` move the highlighted commit, `Enter` shows that commit's diff, and pressing `Enter` again cycles reset options (`--mixed`, then `--hard` — both confirmed).
+
+#### Create a PR from the current branch (`Ctrl+P`)
+
+Pressing `Ctrl+P` on the Local tab runs a **preflight check** (async, never blocks) and only proceeds when everything needed for a PR is true:
+
+1. Current branch resolves (not detached HEAD)
+2. An `origin` remote exists and its URL parses to `owner/repo`
+3. The branch is **pushed** — if not, you're told to press `P` first, then retry
+4. The branch is not **behind** its upstream — if it is, pull first (`F`)
+5. The default base branch is read from `origin`'s HEAD symref (no API call needed)
+
+Then two prompts appear:
+
+- **PR title** — prefilled with the latest commit subject (editable)
+- **Base branch** — prefilled with the remote's default (e.g. `main`); base == head is rejected
+
+The body is auto-generated as a bulleted commit list of `base..head`. Creation runs async and reports the PR number + URL in the status bar. Failures (no scope, no commits between branches, etc.) surface the GitHub API message verbatim with the flow cancelled cleanly.
 
 ### GitHub tab
 
@@ -413,7 +431,9 @@ make build-windows
 ```
 cmd/dashboard/   Bubble Tea app: model.go, update.go, views.go,
                  commands.go, helpers.go, main.go
-pkg/git/         scan/status/diff/log/push (header-auth push!)
+pkg/git/         scan/status/diff/log/push + staging/stash/branches/
+                 clone/sync/blame/hunks/merge-rebase (header-auth push!)
+pkg/github/      REST client (repos, PRs incl. create/merge/diff, issues)
 pkg/github/      REST client (repos, PRs, commits, create repo)
 pkg/auth/        PAT + device flow, token storage/validation, scopes
 pkg/plugin/      lifecycle manager (discover/start/stop/fetch/render)

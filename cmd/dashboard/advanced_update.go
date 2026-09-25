@@ -362,7 +362,8 @@ func (m *DashboardModel) prActionFromOverlay(action, number string) tea.Cmd {
 	return prActionCmd(m.token, owner, repo, n, action)
 }
 
-// runPrompt executes the submitted prompt action.
+// runPrompt executes the submitted prompt action. PR-create prompt kinds are
+// routed first; unknown kinds fall through to the generic switch.
 func (m *DashboardModel) runPrompt(value string) tea.Cmd {
 	p := m.prompt
 	m.prompt = nil
@@ -370,6 +371,12 @@ func (m *DashboardModel) runPrompt(value string) tea.Cmd {
 		return nil
 	}
 	value = strings.TrimSpace(value)
+
+	// PR-create flow owns its prompt kinds while the context is active.
+	if cmd, handled := m.handlePRCreatePrompt(p.kind, value); handled {
+		return cmd
+	}
+
 	repo := p.repoPath
 	switch p.kind {
 	case "branch-create":
@@ -466,6 +473,11 @@ func (m DashboardModel) advancedUpdateMsg(msg tea.Msg) (DashboardModel, tea.Cmd,
 				return m, nil, true
 			}
 		}
+	}
+
+	// PR-create flow messages (preflight/created).
+	if cmd, handled := m.handlePRCreateMsg(msg); handled {
+		return m, cmd, true
 	}
 
 	// Normal messages: try the advanced switch first.
@@ -720,6 +732,10 @@ func (m *DashboardModel) handleAdvancedKey(key string) (tea.Cmd, bool) {
 					return historyActionMsg{Action: "fetch-prune", Output: out, Err: err, Repo: repo}
 				}, true
 			}
+
+		// ----- create PR from current branch -----
+		case "ctrl+p":
+			return m.prCreateKey(key)
 		}
 	}
 

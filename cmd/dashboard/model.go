@@ -162,6 +162,9 @@ type DashboardModel struct {
 
 	// Advanced git features (staging, stash, branches, overlays, sync…)
 	advancedModelFields
+
+	// Create-PR-from-branch flow state
+	prCreateModelFields
 }
 
 func initialModel() DashboardModel {

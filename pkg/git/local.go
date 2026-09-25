@@ -38,6 +38,13 @@ func runGit(repoPath string, args ...string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
+// RunGitCapture exposes runGit for cross-package TUI flows (e.g. the PR
+// preflight) that need lightweight git queries without duplicating the
+// timeout/GIT_TERMINAL_PROMPT=0 setup. Same semantics as runGit.
+func RunGitCapture(repoPath string, args ...string) ([]byte, error) {
+	return runGit(repoPath, args...)
+}
+
 // ScanDirectory scans a directory for git repositories
 // Returns all found repositories, up to a maximum depth
 func ScanDirectory(rootDir string, maxDepth int) ([]LocalRepository, error) {
