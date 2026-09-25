@@ -31,6 +31,12 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// level never inherits a previous message's severity.
 	m.statusLevel = statusInfo
 
+	// Advanced features first: their modals/overlays capture input, and
+	// their messages never reach the legacy switch below.
+	if model, cmd, handled := m.advancedUpdateMsg(msg); handled {
+		return model, cmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -398,6 +404,12 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Advanced git features (staging, stash, branches, sync, overlays…).
+		// Handled before the legacy switch so their uppercase/ctrl chords win.
+		if cmd, handled := m.handleAdvancedKey(msg.String()); handled {
+			return m, cmd
+		}
+
 		switch msg.String() {
 		case "q", "ctrl+c":
 			m.message = "Shutting down plugins and restoring console..."
@@ -408,9 +420,11 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "esc":
-			if m.gitDiffActive || m.gitLogActive {
+			if m.gitDiffActive || m.gitLogActive || m.syncOverlay {
 				m.gitDiffActive = false
 				m.gitLogActive = false
+				m.syncOverlay = false
+				m.hunkMode = false
 				m.message = "Exited diff/log view"
 				return m, nil
 			}

@@ -444,6 +444,186 @@ func (c *GitHubClient) CreateRepository(req CreateRepoRequest) (*Repo, error) {
 	return &r, nil
 }
 
+// PullRequestAction is the requested state change for a pull request.
+type PullRequestAction string
+
+const (
+	PRActionMerge PullRequestAction = "merge"
+	PRActionClose PullRequestAction = "close"
+	PRActionOpen  PullRequestAction = "open"
+)
+
+// PullRequestDiff fetches the combined diff of a pull request using the
+// GitHub media-type trick: requesting the PR with Accept: application/
+// vnd.github.v3.diff returns the patch instead of JSON.
+func (c *GitHubClient) PullRequestDiff(owner, repo string, number int) (string, error) {
+	u := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", apiBaseURL, url.PathEscape(owner), url.PathEscape(repo), number)
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3.diff")
+	req.Header.Set("User-Agent", userAgent)
+
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("API error: status %d: %s", resp.StatusCode, truncateBody(body))
+	}
+	return string(body), nil
+}
+
+// SetPullRequestState merges, closes, or reopens a pull request.
+// Merging uses PUT /pulls/{n}/merge; close/open use PATCH /pulls/{n}.
+func (c *GitHubClient) SetPullRequestState(owner, repo string, number int, action PullRequestAction) (string, error) {
+	owner, repo = url.PathEscape(owner), url.PathEscape(repo)
+	var method, endpoint string
+	var payload []byte
+	switch action {
+	case PRActionMerge:
+		method = http.MethodPut
+		endpoint = fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", apiBaseURL, owner, repo, number)
+		payload, _ = json.Marshal(map[string]interface{}{"merge_method": "merge"})
+	case PRActionClose:
+		method = http.MethodPatch
+		endpoint = fmt.Sprintf("%s/repos/%s/%s/pulls/%d", apiBaseURL, owner, repo, number)
+		payload, _ = json.Marshal(map[string]string{"state": "closed"})
+	case PRActionOpen:
+		method = http.MethodPatch
+		endpoint = fmt.Sprintf("%s/repos/%s/%s/pulls/%d", apiBaseURL, owner, repo, number)
+		payload, _ = json.Marshal(map[string]string{"state": "open"})
+	default:
+		return "", fmt.Errorf("unknown PR action %q", action)
+	}
+
+	req, err := http.NewRequest(method, endpoint, bytes.NewBuffer(payload))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("User-Agent", userAgent)
+
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		var ghErr struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(body, &ghErr) == nil && ghErr.Message != "" {
+			return "", fmt.Errorf("GitHub API error (%d): %s", resp.StatusCode, ghErr.Message)
+		}
+		return "", fmt.Errorf("GitHub API error (%d): %s", resp.StatusCode, truncateBody(body))
+	}
+	switch action {
+	case PRActionMerge:
+		if resp.StatusCode == http.StatusOK {
+			return "merged", nil
+		}
+		// 202: accepted, merge in progress.
+		return "merge accepted", nil
+	case PRActionClose:
+		return "closed", nil
+	case PRActionOpen:
+		return "reopened", nil
+	}
+	return "", nil
+}
+
+// CreatePullRequest opens a new pull request.
+func (c *GitHubClient) CreatePullRequest(owner, repo, title, head, base, body string) (*PullRequest, error) {
+	owner, repo = url.PathEscape(owner), url.PathEscape(repo)
+	payload, _ := json.Marshal(map[string]string{
+		"title": title,
+		"head":  head,
+		"base":  base,
+		"body":  body,
+	})
+	req, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("%s/repos/%s/%s/pulls", apiBaseURL, owner, repo), bytes.NewBuffer(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("User-Agent", userAgent)
+
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		var ghErr struct {
+			Message string `json:"message"`
+			Errors  []struct {
+				Message string `json:"message"`
+			} `json:"errors"`
+		}
+		if json.Unmarshal(data, &ghErr) == nil && ghErr.Message != "" {
+			if len(ghErr.Errors) > 0 && ghErr.Errors[0].Message != "" {
+				return nil, fmt.Errorf("%s: %s", ghErr.Message, ghErr.Errors[0].Message)
+			}
+			return nil, fmt.Errorf("%s", ghErr.Message)
+		}
+		return nil, fmt.Errorf("GitHub API error (%d): %s", resp.StatusCode, truncateBody(data))
+	}
+	var pr PullRequest
+	if err := json.Unmarshal(data, &pr); err != nil {
+		return nil, err
+	}
+	return &pr, nil
+}
+
+// Issue represents a GitHub issue (as returned by the /issues endpoint;
+// pull requests are filtered out by the caller helper ListIssues).
+type Issue struct {
+	Number    int    `json:"number"`
+	Title     string `json:"title"`
+	State     string `json:"state"`
+	HTMLURL   string `json:"html_url"`
+	CreatedAt string `json:"created_at"`
+	User      PRUser `json:"user"`
+	// PullRequest is non-nil when the "issue" is actually a PR.
+	PullRequest *struct{} `json:"pull_request,omitempty"`
+}
+
+// ListIssues lists open issues for a repository, excluding pull requests.
+func (c *GitHubClient) ListIssues(owner, repo string) ([]Issue, error) {
+	u := fmt.Sprintf("%s/repos/%s/%s/issues?state=open&per_page=30", apiBaseURL,
+		url.PathEscape(owner), url.PathEscape(repo))
+	body, err := c.get(u)
+	if err != nil {
+		return nil, err
+	}
+	var all []Issue
+	if err := json.Unmarshal(body, &all); err != nil {
+		return nil, err
+	}
+	issues := make([]Issue, 0, len(all))
+	for _, i := range all {
+		if i.PullRequest == nil { // /issues also returns PRs; drop them
+			issues = append(issues, i)
+		}
+	}
+	return issues, nil
+}
+
 // post performs a POST request with JSON body and returns the response body
 func (c *GitHubClient) post(url string, payload interface{}) ([]byte, error) {
 	data, err := json.Marshal(payload)

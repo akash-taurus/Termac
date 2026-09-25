@@ -190,7 +190,10 @@ func (m DashboardModel) View() string {
 	}
 
 	var mainBody string
-	if m.authModalOpen {
+	// Generic confirm/prompt modals take precedence over legacy modals.
+	if modalBody, isAdvanced := m.advancedModalHook(pal); isAdvanced {
+		mainBody = modalBody
+	} else if m.authModalOpen {
 		mainBody = m.renderAuthModal(pal)
 	} else if m.openFolderModalOpen {
 		mainBody = m.renderOpenFolderModal(pal)
@@ -210,6 +213,9 @@ func (m DashboardModel) View() string {
 			mainBody = m.renderPluginsView(pal, termWidth, mainHeight)
 		}
 	}
+	// Advanced overlays (stash/branches/reflog/blame/issues/sync) replace the
+	// main body; the hunk-mode bar rides above the diff pane.
+	mainBody = m.advancedViewHook(pal, termWidth, mainHeight, mainBody)
 
 	// 5. Status Bar with Indicator Icon
 	statusIcon := statusIconFor(m.statusLevel, pal)
@@ -832,6 +838,40 @@ func (m DashboardModel) viewDetail(pal theme.Palette, detailWidth, totalHeight i
 		b.WriteString(fmt.Sprintf(" │  Author : %s\n", lipgloss.NewStyle().Foreground(pal.Muted).Render("👤 "+repo.LastAuthor)))
 	}
 	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render(" └" + strings.Repeat("─", innerW) + "┘\n\n"))
+
+	// Changed-files list with staging cursor (Local repos only). S/U stage
+	// and unstage the highlighted row; D discards it (with confirmation).
+	if repo.LocalOnly && m.detailedGitStatus != nil && len(m.detailedGitStatus.Files) > 0 {
+		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render(" ┌─ Changed Files " + strings.Repeat("─", max(innerW-16, 2)) + "┐\n"))
+		fileLimit := 6
+		for idx, f := range m.detailedGitStatus.Files {
+			if idx >= fileLimit {
+				b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render(fmt.Sprintf(" │  … and %d more file(s)\n", len(m.detailedGitStatus.Files)-fileLimit)))
+				break
+			}
+			cursor := "  "
+			rowStyle := lipgloss.NewStyle().Foreground(pal.Foreground)
+			if idx == m.fileCursor {
+				cursor = "▸ "
+				rowStyle = lipgloss.NewStyle().Foreground(pal.Foreground).Bold(true)
+			}
+			statusColor := pal.Primary
+			switch {
+			case strings.Contains(f.Status, "?"):
+				statusColor = pal.Highlight
+			case f.Staged:
+				statusColor = pal.Success
+			default:
+				statusColor = pal.Warning
+			}
+			badge := lipgloss.NewStyle().Foreground(statusColor).Bold(true).Render(f.Status)
+			path := truncPath(f.Path, innerW-14)
+			b.WriteString(fmt.Sprintf(" │ %s%s %s\n", cursor, badge, rowStyle.Render(path)))
+		}
+		b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).
+			Render(fmt.Sprintf(" │  [S] stage · [U] unstage · [D] discard · [h] hunks · [Ctrl+Y] history · [Ctrl+B] blame · [Ctrl+U] unstage all\n")))
+		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render(" └" + strings.Repeat("─", innerW) + "┘\n\n"))
+	}
 
 	// PRs section if GitHub
 	if !repo.LocalOnly {

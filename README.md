@@ -209,6 +209,7 @@ Each view keeps its **own repo list and selection** — switching tabs never wip
 | `o` | Open folder by path (modal) |
 | `b` | Native Windows GUI folder picker |
 | `↑/↓` or `k/j` | Move selection (details load async) |
+| `←/→` | Move the changed-file cursor in the detail pane |
 | `Enter` / `f` | Open in-repo file explorer |
 | `i` | `git init` on a non-repo folder |
 | `a` | `git add -A` (stage all) |
@@ -221,11 +222,54 @@ Each view keeps its **own repo list and selection** — switching tabs never wip
 | `p` | Open a terminal at the repo path (wt.exe or PowerShell) |
 | `n` | Publish this folder as a **new GitHub repo** (see [§6](#6-publishing-a-new-repo-to-github)) |
 
-The detail pane shows branch, ahead/behind, upstream, staged/unstaged/untracked counts, remote, and last commit.
+The detail pane shows branch, ahead/behind, upstream, staged/unstaged/untracked counts, remote, and last commit — plus a **changed-files list** with a cursor.
+
+#### Per-file staging (Local tab)
+
+With the changed-files list visible:
+
+| Key | Action |
+|---|---|
+| `S` | Stage the highlighted file (`git add -- <path>`) |
+| `U` | Unstage the highlighted file (keeps working-tree changes) |
+| `Ctrl+U` | Unstage everything |
+| `Ctrl+X` | **Discard** the highlighted file (confirmation required — irreversible) |
+| `h` | Hunk mode: stage individual hunks of the highlighted file (`n`/`p` select, `s` stage hunk) |
+| `Ctrl+Y` | File history (`git log --follow`) for the highlighted file |
+| `Ctrl+B` | Blame view for the highlighted file |
+
+#### Stash, branches, merge/rebase (Local tab)
+
+| Key | Action |
+|---|---|
+| `z` | Stash changes (optional message, includes untracked) |
+| `Z` | Stash list overlay — `Enter` pop, `a` apply (keep entry), `d` drop (confirmed) |
+| `B` | Branch list overlay — `Enter` switch, `n` new branch, `d` delete (confirmed) |
+| `Ctrl+N` | Create + switch to a new branch |
+| `M` | Merge a branch into the current one |
+| `Ctrl+R` | Rebase the current branch onto another |
+| `Ctrl+A` | Abort the in-progress merge/rebase (confirmed) |
+| `Ctrl+G` | Reflog overlay — `Enter` checks out the highlighted state |
+| `Ctrl+F` | `git fetch --all --prune` |
+
+In the **commit log pane** (`g`): `j`/`k` move the highlighted commit, `Enter` shows that commit's diff, and pressing `Enter` again cycles reset options (`--mixed`, then `--hard` — both confirmed).
 
 ### GitHub tab
 
 Requires authentication. Lists all your repositories (paginated, up to 500): stars, forks, language, open PR count, and latest commit per repo. `r` refreshes; `Enter` loads details.
+
+| Key | Action |
+|---|---|
+| `I` | List open issues for the selected repo (overlay) |
+| `Ctrl+M` | Merge the highlighted PR (confirmed) |
+| `Ctrl+E` | Close the highlighted PR (confirmed) |
+
+### Global shortcuts (any tab)
+
+| Key | Action |
+|---|---|
+| `Ctrl+S` | **Sync all local repos** — `git pull --ff-only` in every scanned repo; per-repo results overlay (skips repos without upstream, never auto-merges) |
+| `Ctrl+L` | **Clone by URL** — clones into a subdirectory of your current directory; open it afterwards with `o` |
 
 ### System tab
 
@@ -387,7 +431,7 @@ exe/             Windows architecture & engineering specs (00–10)
 test/e2e/        fixtures (dummy gRPC plugin, scripts)
 ```
 
-**Conventions:** every async git/API call runs in a `tea.Cmd` (UI never blocks); status messages carry an explicit severity level; git subprocesses run with `GIT_TERMINAL_PROMPT=0` and a 30 s timeout; secrets never appear in argv, URLs, or logs.
+**Conventions:** every async git/API call runs in a `tea.Cmd` (UI never blocks); status messages carry an explicit severity level; git subprocesses run with `GIT_TERMINAL_PROMPT=0` and a 30 s timeout (clones get 10 min); secrets never appear in argv, URLs, or logs; destructive operations (discard, reset --hard, branch delete, stash drop, PR close/merge, abort) always route through a confirmation modal.
 
 ---
 

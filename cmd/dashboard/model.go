@@ -151,11 +151,17 @@ type DashboardModel struct {
 	gitDiffText       string
 	gitLogActive      bool
 	gitLogItems       []git.CommitLogItem
+	gitLogCursor      int    // highlighted row in the log pane
+	logDiffSha        string // commit whose diff is currently shown
+	logActionStep     int    // Enter-cycle position for reset options
 
 	// Create & Push to GitHub Modal
 	publishModalOpen bool
 	publishNameInput textinput.Model
 	publishPrivate   bool
+
+	// Advanced git features (staging, stash, branches, overlays, sync…)
+	advancedModelFields
 }
 
 func initialModel() DashboardModel {
