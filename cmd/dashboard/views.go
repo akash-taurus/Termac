@@ -80,8 +80,10 @@ func (m DashboardModel) View() string {
 			Render("○ Guest [l]")
 	}
 
-	// Header credential button: a real click target (mouse is enabled) that
-	// logs out when authenticated and opens the login modal otherwise.
+	// Navigation-bar credential button: a real click target (mouse is enabled)
+	// that logs out when authenticated and opens the login modal otherwise. It
+	// lives in the nav bar (not the title bar) so identity stays in the header
+	// and actions stay with navigation.
 	var authButton string
 	if m.userName != "" {
 		authButton = lipgloss.NewStyle().
@@ -104,8 +106,6 @@ func (m DashboardModel) View() string {
 		themePill,
 		lipgloss.NewStyle().Foreground(pal.Border).Render("  │  "),
 		userPill,
-		"  ",
-		authButton,
 	)
 
 	headerGap := termWidth - lipgloss.Width(leftHeader) - lipgloss.Width(rightHeader) - 2
@@ -131,7 +131,14 @@ func (m DashboardModel) View() string {
 			Render(fmt.Sprintf(" 📂 EXPLORER: %s ", m.activeExplorer.RelativeCurrentPath()))
 		tabsList = append(tabsList, expTab)
 	}
-	tabsLine := lipgloss.JoinHorizontal(lipgloss.Top, tabsList...)
+	// Right-align the credential button on the same row as the tabs so it
+	// reads as part of the navigation bar.
+	tabsLeft := lipgloss.JoinHorizontal(lipgloss.Top, tabsList...)
+	navGap := termWidth - lipgloss.Width(tabsLeft) - lipgloss.Width(authButton) - 2
+	if navGap < 1 {
+		navGap = 1
+	}
+	tabsLine := lipgloss.JoinHorizontal(lipgloss.Top, tabsLeft, strings.Repeat(" ", navGap), authButton)
 
 	// 3. Subtitle / Shortcut Keycaps Bar
 	var keyItems []string

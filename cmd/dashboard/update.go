@@ -45,9 +45,9 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
-		// The header hosts the Login/Logout button; mouse is enabled app-wide
+		// The nav bar hosts the Login/Logout button; mouse is enabled app-wide
 		// (tea.WithMouseAllMotion), so give it a real click target.
-		return m.handleHeaderMouse(msg)
+		return m.handleAuthButtonMouse(msg)
 
 	case systemTickMsg:
 		if m.sysCollector != nil {

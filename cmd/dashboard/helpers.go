@@ -132,7 +132,7 @@ func (m *DashboardModel) logout() tea.Cmd {
 	return githubLogoutCommand()
 }
 
-// authButtonLabel is the text of the header credential button. It is shared
+// authButtonLabel is the text of the nav bar credential button. It is shared
 // by the renderer and the mouse hit-test so the two can never disagree about
 // the button's size or meaning.
 func authButtonLabel(authenticated bool) string {
@@ -148,11 +148,16 @@ func authButtonWidth(authenticated bool) int {
 	return lipgloss.Width(authButtonLabel(authenticated)) + 2
 }
 
-// headerAuthButtonHit reports whether a terminal cell (x, y) falls inside the
-// header's credential button. The button is the last element of the
-// right-aligned header, so it always ends at the right edge of the window.
-func (m DashboardModel) headerAuthButtonHit(x, y int) bool {
-	if y != 0 {
+// navBarRow is the zero-based terminal row of the navigation (tabs) bar: the
+// title bar is row 0, so the nav bar is row 1. The credential button is
+// right-aligned on it.
+const navBarRow = 1
+
+// authButtonHit reports whether a terminal cell (x, y) falls inside the nav
+// bar's credential button. The button is the last element of the bar, so it
+// always ends at the right edge of the window.
+func (m DashboardModel) authButtonHit(x, y int) bool {
+	if y != navBarRow {
 		return false
 	}
 	width := m.width
@@ -163,13 +168,13 @@ func (m DashboardModel) headerAuthButtonHit(x, y int) bool {
 	return x >= start && x < width
 }
 
-// handleHeaderMouse acts on a left-click on the header credential button:
+// handleAuthButtonMouse acts on a left-click on the nav bar credential button:
 // logout when authenticated, otherwise open the GitHub login modal.
-func (m DashboardModel) handleHeaderMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+func (m DashboardModel) handleAuthButtonMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return m, nil
 	}
-	if !m.headerAuthButtonHit(msg.X, msg.Y) {
+	if !m.authButtonHit(msg.X, msg.Y) {
 		return m, nil
 	}
 	if m.userName != "" {

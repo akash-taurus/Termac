@@ -200,10 +200,10 @@ Security notes:
 | `t` | Cycle theme |
 | `q` / `Ctrl+C` | Quit (stops plugins, restores console) |
 
-The header's top-right corner holds the credential button — **⏻ Logout** when
-signed in, **→ Login** otherwise. It is a real mouse click target (mouse input
-is enabled) and shares one implementation with the `u` shortcut and the auth
-modal's `Ctrl+X`.
+The **navigation bar** (the tabs row) ends with the credential button —
+**⏻ Logout** when signed in, **→ Login** otherwise. It is a real mouse click
+target (mouse input is enabled) and shares one implementation with the `u`
+shortcut and the auth modal's `Ctrl+X`.
 
 Each view keeps its **own repo list and selection** — switching tabs never wipes or mixes lists.
 
