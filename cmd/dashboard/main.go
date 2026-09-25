@@ -159,7 +159,7 @@ func initialModel() DashboardModel {
 	ti.Placeholder = "Paste GitHub PAT (ghp_...) or token here"
 	ti.CharLimit = 255
 	ti.Width = 50
-	ti.EchoMode = textinput.EchoPassword
+	ti.EchoMode = textinput.EchoNormal
 
 	fInput := textinput.New()
 	fInput.Placeholder = "Enter or paste directory path (e.g. Z:\\CodeBase\\TUI or .)"
@@ -835,6 +835,23 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.message = "Requesting GitHub device authorization code..."
 				m.authError = ""
 				return m, githubStartDeviceFlowCommand()
+
+			case "x", "X":
+				// Clear stored token — helps when a stale device-flow token lingers.
+				// Letter shortcut only fires on empty field to avoid mangling tokens containing x/X.
+				if m.tokenInput.Value() != "" {
+					break
+				}
+				if m.token != nil && strings.TrimSpace(*m.token) != "" {
+					_ = auth.DeleteToken()
+					m.token = nil
+					m.userName = ""
+					m.authError = ""
+					m.message = "Stored token cleared. Paste a new PAT above and press [Enter]."
+				} else {
+					m.message = "No stored token to clear."
+				}
+				return m, nil
 			}
 
 			m.tokenInput, cmd = m.tokenInput.Update(msg)
@@ -1527,28 +1544,31 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.userName = msg.User
 			m.authModalOpen = false
 			m.authPolling = false
-			// Resume the publish flow that required the PAT: keep the local
-			// repo list intact and reopen the publish modal instead of
-			// replacing m.repos with the GitHub remote list (which wiped
-			// the local repo the user was trying to create/push).
+			// Verify token was actually persisted by reloading from disk
+			if savedTok, err := auth.LoadToken(); err == nil && savedTok.AccessToken != "" {
+				if savedTok.AccessToken != *msg.Token {
+					m.authError = "Token save failed: disk has different token"
+					m.message = "Authentication error: token not persisted correctly"
+					return m, nil
+				}
+				m.token = &savedTok.AccessToken
+			}
 			needsPAT := m.authNeedsPAT
-			// A device-flow result still cannot create repos: keep the
-			// PAT requirement armed so the next publish attempt guides
-			// correctly instead of looping.
 			if msg.Token == nil || !strings.HasPrefix(*msg.Token, "ghu_") {
 				m.authNeedsPAT = false
 			}
 			m.pendingPublish = false
 			m.tokenInput.Blur()
 			m.tokenInput.Reset()
+			tokenType := describeTokenType(*m.token)
 			if needsPAT {
 				if m.selected >= 0 && m.selected < len(m.repos) {
-					return m, m.openPublishModal(fmt.Sprintf("Authenticated as @%s! Confirm repository name to create & push...", msg.User))
+					return m, m.openPublishModal(fmt.Sprintf("Authenticated as @%s (%s)! Confirm repository name to create & push...", msg.User, tokenType))
 				}
-				m.message = fmt.Sprintf("Authenticated as @%s! Select a local repo to publish.", msg.User)
+				m.message = fmt.Sprintf("Authenticated as @%s (%s)! Select a local repo to publish.", msg.User, tokenType)
 				return m, nil
 			}
-			m.message = fmt.Sprintf("Successfully authenticated as @%s! Fetching repositories...", msg.User)
+			m.message = fmt.Sprintf("Successfully authenticated as @%s (%s)! Fetching repositories...", msg.User, tokenType)
 			m.viewMode = ViewGitHub
 			return m, githubReposCommand(context.Background(), msg.Token)
 		}
@@ -2221,7 +2241,7 @@ func (m DashboardModel) renderAuthModal(pal theme.Palette) string {
 		b.WriteString(lipgloss.NewStyle().Foreground(pal.Danger).Bold(true).Render(fmt.Sprintf("  ✖ Error: %s\n\n", m.authError)))
 	}
 
-	b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render("  Controls: [Enter] Submit PAT | [b / Ctrl+O] Open Browser | [d] Device Flow | [Esc] Cancel"))
+	b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render("  Controls: [Enter] Submit PAT | [b / Ctrl+O] Open Browser | [d] Device Flow | [x] Clear Token | [Esc] Cancel"))
 	if m.pendingPublish && m.token != nil {
 		b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render(" ([Esc] continues publish with current token)"))
 	}
