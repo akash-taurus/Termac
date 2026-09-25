@@ -87,5 +87,8 @@ func (c *Collector) TakeSnapshot() SystemSnapshot {
 		ProcessCount: pCount,
 		ThreadCount:  tCount,
 		TopProcesses: procs,
+		// These values are placeholders on non-Windows; flag them so the UI
+		// shows a "simulated" banner instead of implying live host metrics.
+		Simulated: true,
 	}
 }

@@ -1,7 +1,7 @@
 # Makefile for Terminal Dashboard
 
 APP_NAME := dashboard
-VERSION := 1.0.0
+VERSION := 1.1.0
 MODULE := tui
 OUTPUT_DIR := dist/windows
 BUILD_DIR := cmd/$(APP_NAME)

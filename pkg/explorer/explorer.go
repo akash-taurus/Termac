@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"tui/pkg/git"
+	"tui/pkg/system"
 )
 
 // FileEntry represents a file or directory in the explorer
@@ -409,23 +410,8 @@ func (e *Explorer) RelativeCurrentPath() string {
 	return "/" + filepath.ToSlash(rel)
 }
 
-// HumanSize converts bytes to a readable format
+// HumanSize converts bytes to a readable format. It forwards to
+// system.HumanSize so the app has a single byte-formatting implementation.
 func HumanSize(bytes uint64) string {
-	const unit = 1024
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
-	}
-	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-		if exp >= 5 {
-			break
-		}
-	}
-	units := "KMGTPE"
-	if exp >= len(units) {
-		exp = len(units) - 1
-	}
-	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), units[exp])
+	return system.HumanSize(bytes)
 }

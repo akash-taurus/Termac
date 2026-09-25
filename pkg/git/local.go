@@ -700,9 +700,13 @@ func GitPushUpstream(repoPath, remoteOrURL, branchName string) (string, error) {
 	return trimmed, nil
 }
 
-// GitPushUpstreamAuth pushes using an Authorization header so the token never
-// appears in argv (.ps visible) or .git/config (persisted upstream). The
-// remote URL on disk stays clean; only this invocation carries the secret.
+// GitPushUpstreamAuth pushes with an Authorization header injected for this
+// single invocation, so the token is never written to .git/config and never
+// embedded in the remote URL. Pushing to the remote NAME (not a URL) means
+// `-u` records the remote name as the branch upstream, keeping later plain
+// `git push`/`git pull` working.
+// Note: the header value is a git argument, so the token is visible to
+// same-user process listings for the duration of the push.
 func GitPushUpstreamAuth(repoPath, remoteName, branchName, token string) (string, error) {
 	if branchName == "" {
 		branchName = GitBranchName(repoPath)

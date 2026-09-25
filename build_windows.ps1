@@ -1,8 +1,8 @@
 # build_windows.ps1 - Build Windows executable on Windows
-# Usage: .\build_windows.ps1 -Version "1.0.0"
+# Usage: .\build_windows.ps1 -Version "1.1.0"
 
 param(
-    [string]$Version = "1.0.0"
+    [string]$Version = "1.1.0"
 )
 
 $ErrorActionPreference = "Stop"

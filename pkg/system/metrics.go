@@ -64,6 +64,9 @@ type SystemSnapshot struct {
 	ProcessCount int
 	ThreadCount  int
 	TopProcesses []ProcessInfo
+	// Simulated is true when the platform has no real collector (non-Windows)
+	// and the values are placeholders. The UI must not present them as real.
+	Simulated bool
 }
 
 // FormatSparkline produces a Unicode sparkline graph for recent history values (0-100)

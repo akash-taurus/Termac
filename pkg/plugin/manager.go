@@ -114,16 +114,18 @@ func (m *Manager) DiscoverPlugins() ([]*PluginInstance, error) {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
-	// GC deleted files: stop + remove stale instances.
+	// GC deleted files: stop + remove stale instances. Capture the commands and
+	// kill them after releasing the lock (KillCmd can block for seconds and
+	// must not stall every other manager operation).
+	var victims []*exec.Cmd
 	for id, inst := range m.instances {
 		if !seen[id] {
 			if inst.Conn != nil {
 				_ = inst.Conn.Close()
 			}
 			if inst.Cmd != nil {
-				_ = process.KillCmd(inst.Cmd)
+				victims = append(victims, inst.Cmd)
 			}
 			delete(m.instances, id)
 		}
@@ -146,6 +148,11 @@ func (m *Manager) DiscoverPlugins() ([]*PluginInstance, error) {
 	list := make([]*PluginInstance, 0, len(m.instances))
 	for _, inst := range m.instances {
 		list = append(list, copyInstance(inst))
+	}
+	m.mu.Unlock()
+
+	for _, cmd := range victims {
+		_ = process.KillCmd(cmd)
 	}
 	return list, nil
 }
@@ -297,10 +304,9 @@ Connected:
 // StopPlugin terminates the plugin and its process tree
 func (m *Manager) StopPlugin(id string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	inst, exists := m.instances[id]
 	if !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("plugin %q not found", id)
 	}
 
@@ -310,13 +316,17 @@ func (m *Manager) StopPlugin(id string) error {
 		inst.Client = nil
 	}
 
-	if inst.Cmd != nil {
-		_ = process.KillCmd(inst.Cmd)
-		inst.Cmd = nil
-	}
-
+	cmd := inst.Cmd
+	inst.Cmd = nil
 	inst.Status = StatusStopped
 	inst.PID = 0
+	m.mu.Unlock()
+
+	// Kill outside the lock: KillCmd can block for seconds and must not stall
+	// every other manager operation.
+	if cmd != nil {
+		_ = process.KillCmd(cmd)
+	}
 	return nil
 }
 
@@ -389,8 +399,7 @@ func (m *Manager) FetchAndRender(ctx context.Context, id string, width, height i
 // StopAll cleanly terminates all running plugins
 func (m *Manager) StopAll() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	var cmds []*exec.Cmd
 	for _, inst := range m.instances {
 		if inst.Conn != nil {
 			_ = inst.Conn.Close()
@@ -398,11 +407,17 @@ func (m *Manager) StopAll() {
 			inst.Client = nil
 		}
 		if inst.Cmd != nil {
-			_ = process.KillCmd(inst.Cmd)
+			cmds = append(cmds, inst.Cmd)
 			inst.Cmd = nil
 		}
 		inst.Status = StatusStopped
 		inst.PID = 0
+	}
+	m.mu.Unlock()
+
+	// Kill after releasing the lock (KillCmd blocks; don't hold the manager).
+	for _, cmd := range cmds {
+		_ = process.KillCmd(cmd)
 	}
 }
 

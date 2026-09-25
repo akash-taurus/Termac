@@ -5,7 +5,7 @@ A Windows-native Terminal User Interface (TUI) dashboard for managing and monito
 ## Features
 
 - **Windows-Optimized**: Uses Windows Named Pipes for secure plugin communication (no firewall prompts)
-- **Plugin System**: Supports Python, Node.js, and Batch script plugins via gRPC
+- **Plugin System**: Supports Python, Node.js, Batch (`.bat`/`.cmd`), and native `.exe` plugins via gRPC
 - **Process Management**: Robust process tree killing using `taskkill /F /T /PID` to prevent zombies
 - **Terminal Integration**: Proper Virtual Terminal Processing (VTP) and mouse support
 - **Configuration**: Stores config and plugins in `%AppData%\Dashboard\`
@@ -15,7 +15,7 @@ A Windows-native Terminal User Interface (TUI) dashboard for managing and monito
 ## Quick Start
 
 ### Prerequisites
-- Go 1.23+ (matching the version in go.mod)
+- Go 1.24+ (matching the version in go.mod)
 - Windows 10/11 (for native execution)
 - Python/Node.js (optional, for plugin support)
 
@@ -39,11 +39,20 @@ The executable will be created at `dist/windows/dashboard.exe`.
 
 ## Architecture
 
-- **`pkg/launcher`**: Plugin process launcher (Python/Node/Batch/.exe)
-- **`pkg/transport`**: gRPC communication over Windows Named Pipes
-- **`pkg/process`**: Windows process management with `taskkill /F /T /PID`
+- **`cmd/dashboard`**: Bubble Tea TUI (model, update, views, modals)
+- **`pkg/launcher`**: Plugin process launcher (Python/Node/Batch/`.exe`/`.cmd`)
+- **`pkg/plugin`**: Plugin lifecycle manager (discover, start/stop, fetch/render)
+- **`pkg/transport`**: gRPC communication over Windows Named Pipes (Unix sockets elsewhere)
+- **`pkg/process`**: Process management with `taskkill /F /T /PID` and Windows Job Objects
 - **`pkg/verify`**: Zero-TCP socket verification for security
 - **`pkg/term`**: Windows console initialization (VTP, mouse)
+- **`pkg/system`**: CPU / memory / disk / process metrics
+- **`pkg/git`**: Git operations (scan, status, diff, log, push/pull)
+- **`pkg/github`**: GitHub REST API client (repositories, PRs, commits, create repo)
+- **`pkg/auth`**: GitHub authentication (PAT, device flow, token storage)
+- **`pkg/explorer`**: In-repo file/directory browser and preview
+- **`pkg/shell`**: Windows GUI dialogs and Windows Terminal profile registration
+- **`pkg/theme`**: TUI color palettes
 - **`pkg/config`**: Application configuration using `os.UserConfigDir()`
 
 ## Design Specifications

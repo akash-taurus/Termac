@@ -14,7 +14,7 @@ import (
 
 var (
 	apiBaseURL = "https://api.github.com"
-	userAgent  = "TerminalDashboard/1.0.0"
+	userAgent  = "TerminalDashboard/1.1.0"
 )
 
 // GitHubClient handles GitHub API interactions
@@ -158,6 +158,36 @@ func (c *GitHubClient) GetRepositories(page, perPage int) ([]Repo, error) {
 		return nil, err
 	}
 	return repos, nil
+}
+
+// GetRepositoriesAll pages through the authenticated user's repositories,
+// following pagination until a short page is returned or maxRepos is reached.
+// On error it returns the repositories collected so far alongside the error,
+// so a later-page failure still surfaces what was found.
+func (c *GitHubClient) GetRepositoriesAll(maxRepos int) ([]Repo, error) {
+	if maxRepos <= 0 {
+		maxRepos = 500
+	}
+	const (
+		perPage  = 100
+		maxPages = 50 // safety cap: at most perPage*maxPages repos
+	)
+
+	var all []Repo
+	for page := 1; page <= maxPages && len(all) < maxRepos; page++ {
+		repos, err := c.GetRepositories(page, perPage)
+		if err != nil {
+			return all, err
+		}
+		all = append(all, repos...)
+		if len(repos) < perPage {
+			break
+		}
+	}
+	if len(all) > maxRepos {
+		all = all[:maxRepos]
+	}
+	return all, nil
 }
 
 // GetRepository gets a single repository by full name

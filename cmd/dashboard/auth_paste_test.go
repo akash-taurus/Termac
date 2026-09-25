@@ -61,8 +61,9 @@ func TestAuthModalBracketedPaste(t *testing.T) {
 	}
 }
 
-// Letter shortcuts must still work on an empty Token field.
-func TestAuthModalShortcutsOnEmptyField(t *testing.T) {
+// Auth-modal actions are Ctrl chords so every printable character reaches the
+// token field. A plain 'd' must be typed, never treated as device flow.
+func TestAuthModalActionsRequireCtrl(t *testing.T) {
 	ti := textinput.New()
 	ti.Focus()
 	m := DashboardModel{
@@ -73,10 +74,20 @@ func TestAuthModalShortcutsOnEmptyField(t *testing.T) {
 	}
 	model, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	m = model.(DashboardModel)
-	if m.tokenInput.Value() != "" {
-		t.Fatalf("expected empty input to trigger shortcut, got %q", m.tokenInput.Value())
+	if m.tokenInput.Value() != "d" {
+		t.Fatalf("plain 'd' should reach the input, got %q", m.tokenInput.Value())
 	}
-	if m.message != "Requesting GitHub device authorization code..." {
-		t.Fatalf("device flow not triggered on empty-field 'd', message=%q", m.message)
+	if m.message == "Requesting GitHub device authorization code..." {
+		t.Fatal("plain 'd' triggered device flow")
+	}
+
+	// Ctrl+D on an empty field triggers device flow.
+	ti2 := textinput.New()
+	ti2.Focus()
+	m2 := DashboardModel{authModalOpen: true, tokenInput: ti2, viewMode: ViewLocal, selected: -1}
+	model, _ = m2.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	m2 = model.(DashboardModel)
+	if m2.message != "Requesting GitHub device authorization code..." {
+		t.Fatalf("Ctrl+D did not trigger device flow, message=%q", m2.message)
 	}
 }

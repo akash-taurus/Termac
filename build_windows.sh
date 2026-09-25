@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-VERSION="${1:-1.0.0}"
+VERSION="${1:-1.1.0}"
 APP_NAME="dashboard"
 MODULE="tui"
 OUTPUT_DIR="dist/windows"
