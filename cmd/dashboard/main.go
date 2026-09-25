@@ -285,6 +285,7 @@ func (m DashboardModel) Init() tea.Cmd {
 	return tea.Batch(
 		m.spinner.Tick,
 		systemTickCmd(),
+		tea.EnableBracketedPaste,
 	)
 }
 
@@ -745,6 +746,12 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		// If GitHub authentication modal is open, capture input for text field
 		if m.authModalOpen {
+			// Bracketed pastes arrive as a single KeyMsg: send them straight
+			// to the input so no character is mistaken for a shortcut.
+			if msg.Paste {
+				m.tokenInput, cmd = m.tokenInput.Update(msg)
+				return m, cmd
+			}
 			switch msg.String() {
 			case "esc":
 				m.authModalOpen = false
@@ -785,6 +792,13 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 			case "c", "C":
+				// Letter shortcuts only fire on an empty field. Pasted and
+				// typed tokens routinely contain c/d (e.g. ghp_Cd07...);
+				// without this guard each such character would trigger its
+				// shortcut and be swallowed, mangling the token.
+				if m.tokenInput.Value() != "" {
+					break
+				}
 				// Check environment first so a freshly exported PAT always
 				// wins over a stale stored token. Paste works reliably in
 				// PowerShell itself, unlike inside the TUI input where the
@@ -806,6 +820,11 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 
 			case "d", "D":
+				// Same empty-field guard as [c] above: tokens routinely
+				// contain d/D, which must reach the input, not device flow.
+				if m.tokenInput.Value() != "" {
+					break
+				}
 				// Initiate Device Flow — refused when a PAT is required,
 				// otherwise the user loops: device login can never create repos.
 				if m.authNeedsPAT {
