@@ -367,11 +367,9 @@ Drop plugin files into `%AppData%\Dashboard\plugins\` (or a `./plugins` folder n
 | `.js` | Node.js in PATH (`node`) |
 | `.bat` / `.cmd` | — (cmd.exe) |
 
-Sample plugins are included in the repo's `plugins/` directory: `system_info.py`, `quick_status.bat`, `services.ps1` (note: `.ps1` is listed as sample material but is not a launchable type — rename to `.bat`/`.cmd` or ship an `.exe`).
-
 ### Writing your own plugin
 
-A plugin implements two RPCs — `FetchData` (state) and `Render` (ANSI-styled string) — and serves gRPC **on the pipe path the host passes via the `PLUGIN_PIPE` environment variable**. See `exe/plugin_template.py` for a working Python template:
+A plugin implements two RPCs — `FetchData` (state) and `Render` (ANSI-styled string) — and serves gRPC **on the pipe path the host passes via the `PLUGIN_PIPE` environment variable**. A working Python template lives at `exe/plugin_template.py`:
 
 ```python
 class MyPlugin(plugin_pb2_grpc.WidgetPluginServicer):
