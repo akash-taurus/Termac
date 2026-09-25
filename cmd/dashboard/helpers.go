@@ -102,6 +102,87 @@ func isPAT(s string) bool {
 	return strings.HasPrefix(s, "ghp_") || strings.HasPrefix(s, "github_pat_")
 }
 
+// logout clears every piece of GitHub session state from the model and
+// returns the command that deletes the stored token from disk. It is the
+// single implementation behind the [u] shortcut, the header Logout button,
+// and the auth modal's [Ctrl+X], so all three behave identically.
+func (m *DashboardModel) logout() tea.Cmd {
+	// Cancelling an in-flight device-flow poll stops the goroutine from
+	// hitting GitHub for the rest of the code's lifetime.
+	if m.authCancel != nil {
+		m.authCancel()
+		m.authCancel = nil
+	}
+	m.authModalOpen = false
+	m.authPolling = false
+	m.deviceCode = nil
+	m.authError = ""
+	m.authNeedsPAT = false
+	m.pendingPublish = false
+	m.tokenInput.Blur()
+	m.token = nil
+	m.userName = ""
+	m.githubRepos = nil
+	m.githubSelected = 0
+	if m.viewMode == ViewGitHub {
+		m.repos = nil
+		m.selected = 0
+	}
+	m.setStatus(statusLoading, "Logging out from GitHub...")
+	return githubLogoutCommand()
+}
+
+// authButtonLabel is the text of the header credential button. It is shared
+// by the renderer and the mouse hit-test so the two can never disagree about
+// the button's size or meaning.
+func authButtonLabel(authenticated bool) string {
+	if authenticated {
+		return "⏻ Logout"
+	}
+	return "→ Login"
+}
+
+// authButtonWidth is the rendered cell width of the header button: the label
+// plus the button style's horizontal padding of 1 on each side.
+func authButtonWidth(authenticated bool) int {
+	return lipgloss.Width(authButtonLabel(authenticated)) + 2
+}
+
+// headerAuthButtonHit reports whether a terminal cell (x, y) falls inside the
+// header's credential button. The button is the last element of the
+// right-aligned header, so it always ends at the right edge of the window.
+func (m DashboardModel) headerAuthButtonHit(x, y int) bool {
+	if y != 0 {
+		return false
+	}
+	width := m.width
+	if width <= 0 {
+		width = 100
+	}
+	start := width - authButtonWidth(m.userName != "")
+	return x >= start && x < width
+}
+
+// handleHeaderMouse acts on a left-click on the header credential button:
+// logout when authenticated, otherwise open the GitHub login modal.
+func (m DashboardModel) handleHeaderMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return m, nil
+	}
+	if !m.headerAuthButtonHit(msg.X, msg.Y) {
+		return m, nil
+	}
+	if m.userName != "" {
+		return m, m.logout()
+	}
+	m.authModalOpen = true
+	m.tokenInput.Focus()
+	m.tokenInput.Reset()
+	m.authError = ""
+	m.deviceCode = nil
+	return m, textinput.Blink
+}
+
 // openPublishModal opens the create-and-push modal for the selected repo.
 func (m *DashboardModel) openPublishModal(msg string) tea.Cmd {
 	repo := m.repos[m.selected]

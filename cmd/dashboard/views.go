@@ -80,11 +80,32 @@ func (m DashboardModel) View() string {
 			Render("○ Guest [l]")
 	}
 
+	// Header credential button: a real click target (mouse is enabled) that
+	// logs out when authenticated and opens the login modal otherwise.
+	var authButton string
+	if m.userName != "" {
+		authButton = lipgloss.NewStyle().
+			Bold(true).
+			Background(pal.Danger).
+			Foreground(pal.Background).
+			Padding(0, 1).
+			Render(authButtonLabel(true))
+	} else {
+		authButton = lipgloss.NewStyle().
+			Bold(true).
+			Background(pal.Primary).
+			Foreground(pal.Background).
+			Padding(0, 1).
+			Render(authButtonLabel(false))
+	}
+
 	rightHeader := lipgloss.JoinHorizontal(
 		lipgloss.Center,
 		themePill,
 		lipgloss.NewStyle().Foreground(pal.Border).Render("  │  "),
 		userPill,
+		"  ",
+		authButton,
 	)
 
 	headerGap := termWidth - lipgloss.Width(leftHeader) - lipgloss.Width(rightHeader) - 2
@@ -332,7 +353,7 @@ func (m DashboardModel) renderAuthModal(pal theme.Palette) string {
 		b.WriteString(lipgloss.NewStyle().Foreground(pal.Danger).Bold(true).Render(fmt.Sprintf("  ✖ Error: %s\n\n", m.authError)))
 	}
 
-	b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render("  Controls: [Enter] Submit PAT | [Ctrl+O] Browser | [Ctrl+D] Device Flow | [Ctrl+E] Env Token | [Ctrl+X] Clear | [Esc] Cancel"))
+	b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render("  Controls: [Enter] Submit PAT | [Ctrl+O] Browser | [Ctrl+D] Device Flow | [Ctrl+E] Env Token | [Ctrl+X] Logout | [Esc] Cancel"))
 	if m.pendingPublish && m.token != nil {
 		b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render(" ([Esc] continues publish with current token)"))
 	}
@@ -655,27 +676,43 @@ func (m DashboardModel) renderGitLogView(pal theme.Palette, width, height int) s
 		Bold(true).
 		Foreground(pal.Primary).
 		Render(fmt.Sprintf("📜 Git Commit History — %s", repoName))
-	b.WriteString(header + "  " + lipgloss.NewStyle().Foreground(pal.Highlight).Bold(true).Render("[g / Esc] Back\n\n"))
+	b.WriteString(header + "  " + lipgloss.NewStyle().Foreground(pal.Highlight).Bold(true).Render("[g / Esc] Back · [j/k] select · [Enter] diff / reset\n\n"))
 
 	if len(m.gitLogItems) == 0 {
 		b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render("  No commits found in this repository branch.\n\n"))
 	} else {
+		// Two display lines per commit; scroll so the highlighted commit
+		// (which [Enter] acts on) is always visible.
 		maxItems := (height - 6) / 2
 		if maxItems < 3 {
 			maxItems = 3
 		}
-		for i, item := range m.gitLogItems {
-			if i >= maxItems {
-				b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render(fmt.Sprintf("  ... and %d more commits\n", len(m.gitLogItems)-maxItems)))
-				break
+		startIdx := 0
+		if m.gitLogCursor >= maxItems {
+			startIdx = m.gitLogCursor - maxItems + 1
+		}
+		endIdx := startIdx + maxItems
+		if endIdx > len(m.gitLogItems) {
+			endIdx = len(m.gitLogItems)
+		}
+		for i := startIdx; i < endIdx; i++ {
+			item := m.gitLogItems[i]
+			marker := "  "
+			subjStyle := lipgloss.NewStyle().Foreground(pal.Foreground)
+			if i == m.gitLogCursor {
+				marker = "▸ "
+				subjStyle = lipgloss.NewStyle().Bold(true).Foreground(pal.Warning)
 			}
 			hashBadge := lipgloss.NewStyle().Bold(true).Foreground(pal.Highlight).Render(item.Hash)
 			dateBadge := lipgloss.NewStyle().Foreground(pal.Muted).Render(item.Date)
 			authorBadge := lipgloss.NewStyle().Foreground(pal.Secondary).Render("👤 " + item.Author)
-			subj := lipgloss.NewStyle().Foreground(pal.Foreground).Render(trunc(item.Subject, width-10))
+			subj := subjStyle.Render(trunc(item.Subject, width-10))
 
-			b.WriteString(fmt.Sprintf("  %s  %s  %s\n", hashBadge, dateBadge, authorBadge))
-			b.WriteString(fmt.Sprintf("    %s\n\n", subj))
+			b.WriteString(fmt.Sprintf("%s%s  %s  %s\n", marker, hashBadge, dateBadge, authorBadge))
+			b.WriteString(fmt.Sprintf("%s  %s\n\n", marker, subj))
+		}
+		if endIdx < len(m.gitLogItems) {
+			b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render(fmt.Sprintf("  ... %d-%d of %d commits · j/k to scroll\n", startIdx+1, endIdx, len(m.gitLogItems))))
 		}
 	}
 

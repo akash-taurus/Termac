@@ -81,13 +81,12 @@ func prPreflightCmd(repoPath string) tea.Cmd {
 		msg.HasRemote = true
 		msg.RemoteURL = remotes[0].URL
 
-		// Parse owner/repo from the remote for the API call.
-		owner, repo, ok := ownerRepoFromRemote(msg.RemoteURL)
-		if !ok {
+		// The remote must look like a host/owner/repo URL for the API call.
+		if _, _, ok := ownerRepoFromRemote(msg.RemoteURL); !ok {
 			msg.Err = fmt.Errorf("cannot parse owner/repo from remote %s", msg.RemoteURL)
 			return msg
 		}
-		msg.Base, _ = prDefaultBaseFromRemote(owner, repo, msg.Branch)
+		msg.Base = githubDefaultBranch(repoPath)
 
 		// Upstream + ahead/behind from the branch header parser.
 		st, err := git.GitStatusDetailed(repoPath)
@@ -148,30 +147,29 @@ func ownerRepoFromRemote(raw string) (owner, repo string, ok bool) {
 	return "", "", false
 }
 
-// prDefaultBaseFromRemote fetches the remote's default branch to propose as
-// the PR base; falls back to "main".
-func prDefaultBaseFromRemote(owner, repo, currentBranch string) (string, error) {
-	return githubDefaultBranch(owner, repo)
-}
-
-// githubDefaultBranch reads the default branch via a lightweight ls-remote
-// against origin's HEAD symref (no API call, no token needed).
-func githubDefaultBranch(owner, repo string) (string, error) {
+// githubDefaultBranch reads the repository's default branch via a lightweight
+// ls-remote against origin's HEAD symref (no API call, no token needed).
+//
+// repoPath is required: the query must run inside the repository whose remote
+// is being inspected. Running it with an empty dir resolved "origin" of the
+// dashboard process's own working directory instead, so the PR base was
+// silently taken from an unrelated repository.
+func githubDefaultBranch(repoPath string) string {
 	// git ls-remote --symref origin HEAD resolves to
 	// "ref: refs/heads/main\tHEAD" — parse the branch out.
-	out, err := git.RunGitCapture("", "ls-remote", "--symref", "origin", "HEAD")
+	out, err := git.RunGitCapture(repoPath, "ls-remote", "--symref", "origin", "HEAD")
 	if err != nil {
-		return "main", nil // offline or bare: propose main
+		return "main" // offline or bare: propose main
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		if strings.HasSuffix(strings.TrimSpace(line), "HEAD") && strings.HasPrefix(line, "ref:") {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
-				return strings.TrimPrefix(fields[1], "refs/heads/"), nil
+				return strings.TrimPrefix(fields[1], "refs/heads/")
 			}
 		}
 	}
-	return "main", nil
+	return "main"
 }
 
 // prBodyFromCommits builds a PR body listing the commits between base and head.
@@ -227,7 +225,10 @@ func (m *DashboardModel) handlePRCreateMsg(msg tea.Msg) (tea.Cmd, bool) {
 			branch:   msg.Branch,
 			base:     msg.Base,
 		}
-		title := firstLine(m.repos[m.selected].LastMessage)
+		title := ""
+		if m.selected >= 0 && m.selected < len(m.repos) {
+			title = firstLine(m.repos[m.selected].LastMessage)
+		}
 		if title == "" {
 			title = msg.Branch
 		}

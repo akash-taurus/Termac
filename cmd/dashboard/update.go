@@ -44,6 +44,11 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detailWidth = m.width / 2
 		return m, nil
 
+	case tea.MouseMsg:
+		// The header hosts the Login/Logout button; mouse is enabled app-wide
+		// (tea.WithMouseAllMotion), so give it a real click target.
+		return m.handleHeaderMouse(msg)
+
 	case systemTickMsg:
 		if m.sysCollector != nil {
 			m.sysSnapshot = m.sysCollector.TakeSnapshot()
@@ -132,21 +137,14 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 
 			case "ctrl+x":
-				// Clear stored token — helps when a stale device-flow token lingers.
-				if m.token != nil && strings.TrimSpace(*m.token) != "" {
-					_ = auth.DeleteToken()
-					m.token = nil
-					m.userName = ""
-					m.authError = ""
-					m.setStatus(statusSuccess, "Stored token cleared. Paste a new PAT above and press [Enter].")
-				} else {
-					m.setStatus(statusWarn, "No stored token to clear.")
-				}
-				return m, nil
-			}
+				// Logout: clear the stored token and cancel any in-flight
+				// device-flow poll so the goroutine stops hitting GitHub.
+				return m, m.logout()
 
-			m.tokenInput, cmd = m.tokenInput.Update(msg)
-			return m, cmd
+			default:
+				m.tokenInput, cmd = m.tokenInput.Update(msg)
+				return m, cmd
+			}
 		}
 
 		// If Open Folder modal is open
@@ -639,19 +637,7 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, textinput.Blink
 
 		case "u", "U":
-			_ = auth.DeleteToken()
-			m.token = nil
-			m.userName = ""
-			m.authNeedsPAT = false
-			m.pendingPublish = false
-			m.githubRepos = nil
-			m.githubSelected = 0
-			if m.viewMode == ViewGitHub {
-				m.repos = nil
-				m.selected = 0
-			}
-			m.setStatus(statusSuccess, "Logged out from GitHub (token deleted).")
-			return m, nil
+			return m, m.logout()
 
 		case "t", "T":
 			m.themeIndex = (m.themeIndex + 1) % len(theme.AvailableThemes)
@@ -874,6 +860,20 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		pollCtx, cancel := context.WithCancel(context.Background())
 		m.authCancel = cancel
 		return m, githubPollDeviceTokenCommand(pollCtx, msg.Response)
+
+	case githubLogoutMsg:
+		m.token = nil
+		m.userName = ""
+		m.authNeedsPAT = false
+		m.pendingPublish = false
+		m.githubRepos = nil
+		m.githubSelected = 0
+		if m.viewMode == ViewGitHub {
+			m.repos = nil
+			m.selected = 0
+		}
+		m.setStatus(statusSuccess, "Logged out from GitHub (token deleted).")
+		return m, nil
 
 	case pluginActionMsg:
 		if msg.Err != nil {

@@ -160,6 +160,22 @@ func TestBranches(t *testing.T) {
 		t.Fatalf("current branch not first: %+v", branches[0])
 	}
 
+	// feature/x is a LOCAL branch whose name contains a slash. It must not be
+	// reported as remote (regression: remote detection used to look for "/"
+	// in the short name, which blocked checkout/delete of such branches).
+	var feat *BranchInfo
+	for i := range branches {
+		if branches[i].Name == "feature/x" {
+			feat = &branches[i]
+		}
+	}
+	if feat == nil {
+		t.Fatalf("feature/x missing from branch list: %+v", branches)
+	}
+	if feat.IsRemote {
+		t.Errorf("feature/x classified as remote; want local (IsRemote=false)")
+	}
+
 	// Delete the feature branch. It holds an unmerged commit relative to
 	// main, so the safe -d refuses — force is required (and expected).
 	if err := GitDeleteBranch(dir, "feature/x", true); err != nil {
@@ -577,5 +593,90 @@ func TestMergeRebaseConflicts(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "only-side.txt")); err != nil {
 		t.Fatal("side file missing after rebase")
+	}
+}
+
+// A file that is staged AND then modified again must appear once in Files
+// (porcelain "MM"), not twice.
+func TestStatusDetailedOneRowPerFile(t *testing.T) {
+	dir := newTestRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("staged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := GitStageFile(dir, "a.txt"); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("staged\nthen more\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := GitStatusDetailed(dir)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	var rows []FileStatusItem
+	for _, f := range st.Files {
+		if f.Path == "a.txt" {
+			rows = append(rows, f)
+		}
+	}
+	if len(rows) != 1 {
+		t.Fatalf("a.txt appeared %d times in Files, want 1: %+v", len(rows), st.Files)
+	}
+	if rows[0].Status != "MM" || !rows[0].Staged {
+		t.Fatalf("merged row = %+v, want status MM and Staged=true", rows[0])
+	}
+	if st.StagedCount != 1 || st.UnstagedCount != 1 {
+		t.Fatalf("counts = staged %d / unstaged %d, want 1/1", st.StagedCount, st.UnstagedCount)
+	}
+}
+
+// GitReset must actually move HEAD for every mode. Regression: the argument
+// list contained a "--" separator, which made git treat the target as a
+// pathspec — --mixed silently reset nothing and --soft/--hard failed with
+// "Cannot do <mode> reset with paths".
+func TestResetModesMoveHEAD(t *testing.T) {
+	dir := newTestRepo(t)
+	commitAll(t, dir, "second")
+	commitAll(t, dir, "third")
+
+	countCommits := func() int {
+		t.Helper()
+		logs, err := GitLog(dir, 50)
+		if err != nil {
+			t.Fatalf("git log: %v", err)
+		}
+		return len(logs)
+	}
+	if got := countCommits(); got != 3 {
+		t.Fatalf("precondition: %d commits, want 3", got)
+	}
+
+	if _, err := GitReset(dir, "HEAD~2", ResetHard); err != nil {
+		t.Fatalf("reset --hard HEAD~2: %v", err)
+	}
+	if got := countCommits(); got != 1 {
+		t.Fatalf("after reset --hard HEAD~2: %d commits, want 1", got)
+	}
+
+	commitAll(t, dir, "fourth")
+	if _, err := GitReset(dir, "HEAD~1", ResetSoft); err != nil {
+		t.Fatalf("reset --soft HEAD~1: %v", err)
+	}
+	if got := countCommits(); got != 1 {
+		t.Fatalf("after reset --soft HEAD~1: %d commits, want 1", got)
+	}
+
+	commitAll(t, dir, "fifth")
+	if _, err := GitReset(dir, "HEAD~1", ResetMixed); err != nil {
+		t.Fatalf("reset --mixed HEAD~1: %v", err)
+	}
+	if got := countCommits(); got != 1 {
+		t.Fatalf("after reset --mixed HEAD~1: %d commits, want 1", got)
+	}
+
+	// A flag-like target must be refused, never passed through to git.
+	if _, err := GitReset(dir, "-x", ResetMixed); err == nil {
+		t.Fatal("reset with a flag-like target should be refused")
 	}
 }

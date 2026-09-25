@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -117,6 +118,31 @@ func TestStashOverlayOpenNavigateClose(t *testing.T) {
 	}
 	// Esc closes the overlay.
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+}
+
+// While an overlay is open its keystrokes are captured, but command-result
+// messages must still be processed: overlay actions (pop/apply/drop/checkout)
+// dispatch commands while the overlay stays open, and swallowing their
+// results silently dropped the refresh and left the overlay stale.
+func TestOverlayDoesNotSwallowCommandResults(t *testing.T) {
+	m := advancedKeyModel(t)
+	m.overlay = &overlayPane{
+		kind:    overlayStashList,
+		title:   "Stashes",
+		lines:   []string{"stash@{0} abc WIP", "stash@{1} def more"},
+		stashes: []git.StashItem{{Index: 0, Hash: "abc", Desc: "WIP"}, {Index: 1, Hash: "def", Desc: "more"}},
+	}
+	model, _ := m.Update(branchMsg{Action: "list", Err: errors.New("boom")})
+	got := model.(DashboardModel)
+	if got.statusLevel != statusError || !strings.Contains(got.message, "boom") {
+		t.Fatalf("overlay swallowed command result: level=%v msg=%q", got.statusLevel, got.message)
+	}
+	// Keystrokes are still captured by the overlay.
+	model, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	got = model.(DashboardModel)
+	if got.overlay == nil || got.overlay.cursor != 1 {
+		t.Fatalf("overlay navigation broke: %+v", got.overlay)
+	}
 }
 
 // Log pane: j/k moves the commit cursor and Enter routes to the commit-diff

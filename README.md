@@ -177,8 +177,9 @@ $env:GITHUB_TOKEN = "ghp_xxxxxxxxxxxxxxxxxxxx"
 
 | Action | How |
 |---|---|
-| Clear stored token (in-modal) | `Ctrl+X` |
+| **Logout button** (header) | click **⏻ Logout** in the top-right corner |
 | Logout (anywhere) | press `u` |
+| Logout (auth modal) | `Ctrl+X` |
 | Logout (CLI) | `dashboard.exe -logout` |
 
 Security notes:
@@ -198,6 +199,11 @@ Security notes:
 | `1` `2` `3` `4` | Jump to Local / GitHub / System / Plugins |
 | `t` | Cycle theme |
 | `q` / `Ctrl+C` | Quit (stops plugins, restores console) |
+
+The header's top-right corner holds the credential button — **⏻ Logout** when
+signed in, **→ Login** otherwise. It is a real mouse click target (mouse input
+is enabled) and shares one implementation with the `u` shortcut and the auth
+modal's `Ctrl+X`.
 
 Each view keeps its **own repo list and selection** — switching tabs never wipes or mixes lists.
 

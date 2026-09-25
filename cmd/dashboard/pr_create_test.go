@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -265,5 +266,44 @@ func TestPRBodyFromCommits(t *testing.T) {
 	body := prBodyFromCommits(".", "HEAD", "HEAD")
 	if body != "" {
 		t.Logf("body on degenerate range = %q", body)
+	}
+}
+
+func gitTestRunCmd(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// The default branch for a PR base must be read from the TARGET repository's
+// origin, not from the dashboard process's own working directory (regression:
+// the ls-remote was run with an empty dir, so "origin" resolved to whatever
+// repo the process happened to sit in).
+func TestGithubDefaultBranchUsesTargetRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	gitTestRunCmd(t, root, "init", "--bare", "-b", "trunk", origin)
+
+	work := filepath.Join(root, "work")
+	gitTestRunCmd(t, root, "init", "-b", "main", work)
+	gitTestRunCmd(t, work, "config", "user.email", "t@e.com")
+	gitTestRunCmd(t, work, "config", "user.name", "T")
+	if err := os.WriteFile(filepath.Join(work, "f.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitTestRunCmd(t, work, "add", "-A")
+	gitTestRunCmd(t, work, "commit", "-m", "c1")
+	gitTestRunCmd(t, work, "remote", "add", "origin", origin)
+	// Give the bare remote a real trunk branch so its HEAD symref resolves.
+	gitTestRunCmd(t, work, "push", "origin", "main:trunk")
+
+	if got := githubDefaultBranch(work); got != "trunk" {
+		t.Fatalf("githubDefaultBranch(work) = %q, want trunk", got)
 	}
 }

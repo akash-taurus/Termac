@@ -615,12 +615,24 @@ func GitStatusDetailed(repoPath string) (*DetailedGitStatus, error) {
 				res.UntrackedCount++
 				res.Files = append(res.Files, FileStatusItem{Path: filePath, Status: "?", Staged: false})
 			} else {
-				if stagedChar != ' ' && stagedChar != '?' {
+				// One row per file. A partly-staged file (porcelain "MM",
+				// "AM", "RM"…) used to be emitted twice — once per half — which
+				// duplicated the changed-files list and made the staging cursor
+				// point at two identical paths.
+				staged := stagedChar != ' ' && stagedChar != '?'
+				unstaged := worktreeChar != ' ' && worktreeChar != '?'
+				if staged {
 					res.StagedCount++
-					res.Files = append(res.Files, FileStatusItem{Path: filePath, Status: string(stagedChar), Staged: true})
 				}
-				if worktreeChar != ' ' && worktreeChar != '?' {
+				if unstaged {
 					res.UnstagedCount++
+				}
+				switch {
+				case staged && unstaged:
+					res.Files = append(res.Files, FileStatusItem{Path: filePath, Status: string(stagedChar) + string(worktreeChar), Staged: true})
+				case staged:
+					res.Files = append(res.Files, FileStatusItem{Path: filePath, Status: string(stagedChar), Staged: true})
+				case unstaged:
 					res.Files = append(res.Files, FileStatusItem{Path: filePath, Status: string(worktreeChar), Staged: false})
 				}
 			}

@@ -462,6 +462,15 @@ func publishAndPushCmd(token, userName, repoPath, repoName, description string, 
 	}
 }
 
+func githubLogoutCommand() tea.Cmd {
+	return func() tea.Msg {
+		_ = auth.DeleteToken()
+		return githubLogoutMsg{}
+	}
+}
+
+type githubLogoutMsg struct{}
+
 type pluginActionMsg struct {
 	ID     string
 	Action string

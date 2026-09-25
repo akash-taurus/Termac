@@ -10,7 +10,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -173,7 +172,7 @@ func (m DashboardModel) handleAdvancedMsg(msg tea.Msg) (DashboardModel, tea.Cmd,
 			if len(msg.Hunks) > 0 {
 				m.hunkMode = true
 				m.hunkCursor = 0
-				m.overlay = &overlayPane{kind: overlayNone, title: fmt.Sprintf("Hunks: %s — s: stage hunk · Esc: exit hunk mode", m.hunkPath()), hunks: msg.Hunks}
+				m.overlay = &overlayPane{kind: overlayNone, path: msg.Path, title: fmt.Sprintf("Hunks: %s — s: stage hunk · Esc: exit hunk mode", msg.Path), hunks: msg.Hunks}
 				// Render the hunk bodies as the overlay content.
 				lines := make([]string, 0, len(msg.Hunks))
 				for i, h := range msg.Hunks {
@@ -441,7 +440,10 @@ func (m DashboardModel) advancedUpdateMsg(msg tea.Msg) (DashboardModel, tea.Cmd,
 		return m, nil, true
 	}
 
-	// Overlay navigation captures j/k/enter/etc.
+	// Overlay navigation captures keys. Non-key messages MUST keep flowing:
+	// overlay actions (pop/apply/drop/checkout) dispatch commands while the
+	// overlay stays open, and swallowing their result messages silently
+	// dropped the operation's status refresh (and left the overlay stale).
 	if m.overlay != nil && m.overlay.kind != overlayNone {
 		if key, ok := msg.(tea.KeyMsg); ok {
 			switch key.String() {
@@ -465,13 +467,9 @@ func (m DashboardModel) advancedUpdateMsg(msg tea.Msg) (DashboardModel, tea.Cmd,
 			case "a":
 				return m, m.overlayApply(), true
 			}
-		}
-		// Spinner/system ticks pass through so animations keep running; other
-		// messages are swallowed while an overlay is open.
-		if _, isTick := msg.(systemTickMsg); !isTick {
-			if _, isSpin := msg.(spinner.TickMsg); !isSpin {
-				return m, nil, true
-			}
+			// Any other key is swallowed so it cannot trigger a global shortcut
+			// behind the overlay.
+			return m, nil, true
 		}
 	}
 
@@ -612,8 +610,14 @@ func (m *DashboardModel) handleAdvancedKey(key string) (tea.Cmd, bool) {
 			}
 			return nil, true
 		case "s":
+			// Target the file the loaded hunks belong to, not whatever the
+			// detail-pane cursor happens to be on now.
+			hunkPath := m.overlay.path
+			if hunkPath == "" {
+				hunkPath = m.hunkPath()
+			}
 			if m.hunkCursor < len(m.overlay.hunks) {
-				return stageHunkCmd(repo, m.hunkPath(), m.hunkCursor), true
+				return stageHunkCmd(repo, hunkPath, m.hunkCursor), true
 			}
 			return nil, true
 		case "esc":

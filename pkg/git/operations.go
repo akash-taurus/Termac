@@ -100,8 +100,13 @@ type BranchInfo struct {
 }
 
 // GitListBranches returns local and remote-tracking branches, current first.
+//
+// Remote detection uses the FULL refname (refs/remotes/...), not a slash in
+// the short name: local branches commonly contain slashes (feature/x,
+// bugfix/y) and were previously misclassified as remote, which made them
+// impossible to check out or delete from the branch overlay.
 func GitListBranches(repoPath string) ([]BranchInfo, error) {
-	out, err := runGit(repoPath, "branch", "-a", "--format=%(HEAD)%00%(refname:short)")
+	out, err := runGit(repoPath, "branch", "-a", "--format=%(HEAD)%00%(refname)%00%(refname:short)")
 	if err != nil {
 		return nil, fmt.Errorf("git branch failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -110,15 +115,16 @@ func GitListBranches(repoPath string) ([]BranchInfo, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\x00", 2)
-		if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
+		parts := strings.SplitN(line, "\x00", 3)
+		if len(parts) != 3 || strings.TrimSpace(parts[2]) == "" {
 			continue
 		}
-		b := BranchInfo{Name: strings.TrimSpace(parts[1])}
+		ref := strings.TrimSpace(parts[1])
+		b := BranchInfo{Name: strings.TrimSpace(parts[2])}
 		b.IsHead = strings.TrimSpace(parts[0]) == "*"
-		b.IsRemote = strings.Contains(b.Name, "/")
-		if b.IsRemote && (strings.HasSuffix(b.Name, "/HEAD") || strings.HasPrefix(b.Name, "origin/HEAD")) {
-			continue // not a real branch
+		b.IsRemote = strings.HasPrefix(ref, "refs/remotes/")
+		if b.IsRemote && strings.HasSuffix(ref, "/HEAD") {
+			continue // origin/HEAD is a symref pointer, not a real branch
 		}
 		branches = append(branches, b)
 	}
@@ -220,14 +226,24 @@ const (
 
 // GitReset resets the current branch to a target commit/branch (default
 // HEAD). ResetHard discards working-tree changes — confirm first.
+//
+// Note: no "--" before the target. With a separator git treats everything
+// after it as a pathspec, so `git reset --mixed -- HEAD~1` silently reset
+// nothing and `--hard`/`--soft` failed with "Cannot do <mode> reset with
+// paths". A leading "-" is rejected so the target can never be read as a
+// flag.
 func GitReset(repoPath, target string, mode GitResetMode) (string, error) {
 	if mode == "" {
 		mode = ResetMixed
 	}
-	if strings.TrimSpace(target) == "" {
+	target = strings.TrimSpace(target)
+	if target == "" {
 		target = "HEAD"
 	}
-	out, err := runGit(repoPath, "reset", string(mode), "--", target)
+	if strings.HasPrefix(target, "-") {
+		return "", fmt.Errorf("invalid reset target %q", target)
+	}
+	out, err := runGit(repoPath, "reset", string(mode), target)
 	trimmed := strings.TrimSpace(string(out))
 	if err != nil {
 		return trimmed, fmt.Errorf("git reset %s %s failed: %s: %w", mode, target, trimmed, err)

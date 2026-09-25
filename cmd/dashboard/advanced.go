@@ -63,6 +63,10 @@ type overlayPane struct {
 	title  string
 	lines  []string // pre-rendered content lines
 	cursor int
+	// path is the file whose hunks are loaded in hunk mode. It is recorded
+	// when the hunks load so staging always targets that file, even if the
+	// detail-pane file cursor moved while hunk mode was open.
+	path string
 	// items carry selectable payloads for actionable overlays.
 	branches  []git.BranchInfo
 	stashes   []git.StashItem
@@ -178,7 +182,10 @@ type overlayDataMsg struct {
 	Branches []git.BranchInfo
 	Stashes  []git.StashItem
 	Hunks    []git.DiffHunk
-	Err      error
+	// Path is set for hunk-loading responses so hunk mode knows which file
+	// the hunks belong to.
+	Path string
+	Err  error
 }
 
 // ---------- Commands ----------
@@ -413,9 +420,9 @@ func hunksCmd(repoPath, path string) tea.Cmd {
 	return func() tea.Msg {
 		hunks, err := git.GitSplitHunks(repoPath, path)
 		if err != nil {
-			return overlayDataMsg{Kind: overlayNone, Err: err}
+			return overlayDataMsg{Kind: overlayNone, Path: path, Err: err}
 		}
-		return overlayDataMsg{Kind: overlayNone, Hunks: hunks}
+		return overlayDataMsg{Kind: overlayNone, Path: path, Hunks: hunks}
 	}
 }
 
