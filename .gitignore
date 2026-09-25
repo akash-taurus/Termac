@@ -1,17 +1,27 @@
-*.sock
-dist/
-*.exe
-*.test
-*.syso
-*.exe~
-ok.txt
+# --- Local AI/dev tools (never commit) ---
 .agents/
+.kilo/
 .vscode/
 .idea/
+
+# --- Build output ---
+dist/
+*.exe
+*.exe~
+*.test
+*.syso
+*.sock
+
+# --- Scratch / artifacts ---
+ok.txt
 *.log
-coverage.out
-coverage.html
-.DS_Store
-Thumbs.db
 *.swp
 *~
+
+# --- Coverage ---
+coverage.out
+coverage.html
+
+# --- OS noise ---
+.DS_Store
+Thumbs.db
