@@ -707,10 +707,11 @@ func GitPushUpstreamAuth(repoPath, remoteName, branchName, token string) (string
 	if branchName == "" {
 		branchName = GitBranchName(repoPath)
 	}
+	token = strings.TrimSpace(token)
 	if token == "" {
 		return GitPushUpstream(repoPath, remoteName, branchName)
 	}
-	header := "AUTHORIZATION: bearer " + token
+	header := "Authorization: Bearer " + token
 	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-c", "http.extraHeader="+header, "push", "-u", "--", remoteName, branchName)
