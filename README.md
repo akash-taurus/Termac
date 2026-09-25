@@ -369,7 +369,7 @@ Drop plugin files into `%AppData%\Dashboard\plugins\` (or a `./plugins` folder n
 
 ### Writing your own plugin
 
-A plugin implements two RPCs — `FetchData` (state) and `Render` (ANSI-styled string) — and serves gRPC **on the pipe path the host passes via the `PLUGIN_PIPE` environment variable**. A working Python template lives at `exe/plugin_template.py`:
+A plugin implements two RPCs — `FetchData` (state) and `Render` (ANSI-styled string) — and serves gRPC **on the pipe path the host passes via the `PLUGIN_PIPE` environment variable**. Minimal Python skeleton:
 
 ```python
 class MyPlugin(plugin_pb2_grpc.WidgetPluginServicer):
@@ -451,7 +451,6 @@ pkg/config/      %AppData% path helpers
 pkg/shell/       GUI dialogs, Windows Terminal profile registration
 pkg/term/        VTP + mouse init/restore
 pkg/theme/       color palettes
-exe/             Windows architecture & engineering specs (00–10)
 test/e2e/        fixtures (dummy gRPC plugin, scripts)
 ```
 
