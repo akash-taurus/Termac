@@ -368,13 +368,13 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 
-			case "p", "P":
-				if err := m.activeExplorer.OpenInTerminal(); err != nil {
-					m.setStatusf(statusError, "Failed to launch Terminal: %v", err)
-				} else {
-					m.setStatusf(statusSuccess, "Opened Terminal at: %s", m.activeExplorer.CurrentDir)
-				}
-				return m, nil
+case "p":
+			if err := m.activeExplorer.OpenInTerminal(); err != nil {
+				m.setStatusf(statusError, "Failed to launch Terminal: %v", err)
+			} else {
+				m.setStatusf(statusSuccess, "Opened Terminal at: %s", m.activeExplorer.CurrentDir)
+			}
+			return m, nil
 
 			case "v", "V":
 				if err := m.activeExplorer.OpenInVSCode(); err != nil {
