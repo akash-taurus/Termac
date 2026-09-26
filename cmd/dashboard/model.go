@@ -94,7 +94,6 @@ type DashboardModel struct {
 	localSelected  int
 	githubRepos    []RepoDetail
 	githubSelected int
-	detailWidth    int
 	spinner        spinner.Model
 	message        string
 	statusLevel    statusLevel

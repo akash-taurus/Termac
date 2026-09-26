@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -205,36 +204,6 @@ func (c *GitHubClient) GetRepository(owner, repo string) (*Repo, error) {
 	return &r, nil
 }
 
-// GetBranches lists branches for a repository
-func (c *GitHubClient) GetBranches(owner, repo string) ([]Branch, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/branches", apiBaseURL, url.PathEscape(owner), url.PathEscape(repo))
-	body, err := c.get(url)
-	if err != nil {
-		return nil, err
-	}
-
-	var branches []Branch
-	if err := json.Unmarshal(body, &branches); err != nil {
-		return nil, err
-	}
-	return branches, nil
-}
-
-// GetCommits lists commits for a repository
-func (c *GitHubClient) GetCommits(owner, repo string, page int) ([]Commit, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/commits?page=%d&per_page=10", apiBaseURL, url.PathEscape(owner), url.PathEscape(repo), page)
-	body, err := c.get(url)
-	if err != nil {
-		return nil, err
-	}
-
-	var commits []Commit
-	if err := json.Unmarshal(body, &commits); err != nil {
-		return nil, err
-	}
-	return commits, nil
-}
-
 // GetPullRequests lists pull requests for a repository
 func (c *GitHubClient) GetPullRequests(owner, repo string) ([]PullRequest, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls?state=open&per_page=20", apiBaseURL, url.PathEscape(owner), url.PathEscape(repo))
@@ -248,28 +217,6 @@ func (c *GitHubClient) GetPullRequests(owner, repo string) ([]PullRequest, error
 		return nil, err
 	}
 	return prs, nil
-}
-
-// GetRepositoryPRs gets pull requests for a specific repository
-func (c *GitHubClient) GetRepositoryPRs(owner, repo string) ([]PullRequest, error) {
-	return c.GetPullRequests(owner, repo)
-}
-
-// SearchRepositories searches GitHub repositories
-func (c *GitHubClient) SearchRepositories(query string, page int) ([]Repo, error) {
-	url := fmt.Sprintf("%s/search/repositories?q=%s&page=%d&per_page=20&sort=stars", apiBaseURL, url.QueryEscape(query), page)
-	body, err := c.get(url)
-	if err != nil {
-		return nil, err
-	}
-
-	var result struct {
-		Items []Repo `json:"items"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, err
-	}
-	return result.Items, nil
 }
 
 // get performs a GET request and returns the response body
@@ -321,19 +268,6 @@ func truncateBody(b []byte) string {
 		return s[:500] + "..."
 	}
 	return s
-}
-
-// GetBranchProtection checks if a branch has protection enabled
-func (c *GitHubClient) GetBranchProtection(owner, repo, branch string) (bool, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/branches/%s/protection", apiBaseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(branch))
-	_, err := c.get(url)
-	if err != nil {
-		if strings.Contains(err.Error(), "resource not found") {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
 }
 
 // GetRepoCommit gets a specific commit
@@ -388,25 +322,6 @@ func (c *GitHubClient) GetRepoCommits(owner, repo string, page int) ([]Commit, e
 		}
 	}
 	return commits, nil
-}
-
-// GetRepoStats gets repository statistics
-func (c *GitHubClient) GetRepoStats(owner, repo string) (map[string]string, error) {
-	stats := make(map[string]string)
-
-	repoData, err := c.GetRepository(owner, repo)
-	if err != nil {
-		return stats, err
-	}
-
-	stats["stars"] = strconv.Itoa(repoData.Stars)
-	stats["forks"] = strconv.Itoa(repoData.Forks)
-	stats["language"] = repoData.Language
-	stats["default_branch"] = repoData.Branch
-	stats["updated_at"] = repoData.UpdatedAt
-	stats["private"] = strconv.FormatBool(repoData.Private)
-
-	return stats, nil
 }
 
 // CreateRepoRequest represents parameters for creating a new GitHub repository

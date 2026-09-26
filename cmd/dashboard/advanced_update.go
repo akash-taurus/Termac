@@ -97,6 +97,14 @@ func (m DashboardModel) handleAdvancedMsg(msg tea.Msg) (DashboardModel, tea.Cmd,
 		}
 		return m, m.refreshRepoDetails(), true
 
+	case restoreFileMsg:
+		if msg.Err != nil {
+			m.setStatusf(statusError, "restore file %s from %s: %v", msg.Path, msg.SHA[:min(8, len(msg.SHA))], msg.Err)
+		} else {
+			m.setStatusf(statusSuccess, "Restored %s from %s (unstaged)", msg.Path, msg.SHA[:min(8, len(msg.SHA))])
+		}
+		return m, m.refreshRepoDetails(), true
+
 	case cloneMsg:
 		m.cloning = false
 		if msg.Err != nil {
@@ -328,6 +336,9 @@ func (m *DashboardModel) runConfirm() tea.Cmd {
 		return m.prActionFromOverlay("merge", c.arg)
 	case "pr-close":
 		return m.prActionFromOverlay("close", c.arg)
+	case "restore-file":
+		// arg = sha, arg2 = file path
+		return restoreFileCmd(repo, c.arg, c.arg2)
 	}
 	return nil
 }
@@ -446,6 +457,7 @@ func (m DashboardModel) advancedUpdateMsg(msg tea.Msg) (DashboardModel, tea.Cmd,
 	// dropped the operation's status refresh (and left the overlay stale).
 	if m.overlay != nil && m.overlay.kind != overlayNone {
 		if key, ok := msg.(tea.KeyMsg); ok {
+			repo := m.activeRepoPath()
 			switch key.String() {
 			case "esc", "q":
 				m.overlay = nil
@@ -466,6 +478,35 @@ func (m DashboardModel) advancedUpdateMsg(msg tea.Msg) (DashboardModel, tea.Cmd,
 				return m, m.overlayDelete(), true
 			case "a":
 				return m, m.overlayApply(), true
+			case "R": // checkout commit in reflog
+				if m.overlay.kind == overlayReflog && m.overlay.cursor < len(m.overlay.lines) && repo != "" {
+					sha := strings.Fields(m.overlay.lines[m.overlay.cursor])
+					if len(sha) > 1 {
+						m.openConfirm(confirmAction{title: "Checkout " + sha[1] + "? (detached HEAD)", kind: "checkout-sha", repoPath: repo, arg: sha[1]})
+					}
+					return m, nil, true
+				}
+			case "shift+R": // hard reset in reflog
+				if m.overlay.kind == overlayReflog && m.overlay.cursor < len(m.overlay.lines) && repo != "" {
+					sha := strings.Fields(m.overlay.lines[m.overlay.cursor])
+					if len(sha) > 1 {
+						m.openConfirm(confirmAction{title: "Reset --hard to " + sha[1] + "? DELETES all changes after it!", kind: "reset-hard", repoPath: repo, arg: sha[1]})
+					}
+					return m, nil, true
+				}
+			case "ctrl+e": // extract file in file history
+				if m.overlay.kind == overlayFileHistory && m.overlay.cursor < len(m.overlay.lines) && repo != "" {
+					fields := strings.Fields(m.overlay.lines[m.overlay.cursor])
+					if len(fields) > 0 {
+						sha := fields[0]
+						filePath := m.overlay.path
+						if filePath == "" {
+							filePath = m.hunkPath()
+						}
+						m.openConfirm(confirmAction{title: "Restore " + filePath + " from " + sha + "? (unstaged)", kind: "restore-file", repoPath: repo, arg: sha, arg2: filePath})
+					}
+					return m, nil, true
+				}
 			}
 			// Any other key is swallowed so it cannot trigger a global shortcut
 			// behind the overlay.
@@ -497,8 +538,10 @@ func (m *DashboardModel) overlayEnter() tea.Cmd {
 	}
 	switch o.kind {
 	case overlayBranchList:
-		if b := o.branches[o.cursor]; !b.IsRemote && !b.IsHead {
-			return branchCmd("checkout", repo, b.Name, false)
+		if o.cursor < len(o.branches) {
+			if b := o.branches[o.cursor]; !b.IsRemote && !b.IsHead {
+				return branchCmd("checkout", repo, b.Name, false)
+			}
 		}
 	case overlayStashList:
 		if o.cursor < len(o.stashes) {
@@ -600,13 +643,11 @@ func (m *DashboardModel) handleAdvancedKey(key string) (tea.Cmd, bool) {
 		case "n", "down", "j":
 			if m.hunkCursor < len(m.overlay.hunks)-1 {
 				m.hunkCursor++
-				m.refreshHunkOverlayLines()
 			}
 			return nil, true
 		case "p", "up", "k":
 			if m.hunkCursor > 0 {
 				m.hunkCursor--
-				m.refreshHunkOverlayLines()
 			}
 			return nil, true
 		case "s":
@@ -782,6 +823,22 @@ func (m *DashboardModel) handleAdvancedKey(key string) (tea.Cmd, bool) {
 				return nil, true
 			}
 		}
+
+	// ----- time travel: return to present (detached HEAD only) -----
+	case "alt+r":
+		if repo != "" && git.GitBranchName(repo) == "HEAD" {
+			branch := git.GitBranchName(repo)
+			// Get the actual branch name from the upstream or use "main" as fallback
+			if branch == "HEAD" {
+				// Try to get the symbolic ref to find the branch name
+				out, _ := git.RunGitCapture(repo, "symbolic-ref", "--short", "HEAD")
+				branch = strings.TrimSpace(string(out))
+				if branch == "" {
+					branch = "main"
+				}
+			}
+			return branchCmd("checkout", repo, branch, false), true
+		}
 	}
 	return nil, false
 }
@@ -790,23 +847,6 @@ func (m *DashboardModel) handleAdvancedKey(key string) (tea.Cmd, bool) {
 type githubPullRequestRef struct {
 	Number int
 	Title  string
-}
-
-// refreshHunkOverlayLines re-renders the hunk selector rows after a cursor
-// move.
-func (m *DashboardModel) refreshHunkOverlayLines() {
-	if m.overlay == nil {
-		return
-	}
-	lines := make([]string, 0, len(m.overlay.hunks))
-	for i, h := range m.overlay.hunks {
-		marker := " "
-		if i == m.hunkCursor {
-			marker = ">"
-		}
-		lines = append(lines, marker+" "+h.Header)
-	}
-	m.overlay.lines = lines
 }
 
 // selectedPR returns the PR under the GitHub detail cursor, if loaded.

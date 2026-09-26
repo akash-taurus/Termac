@@ -217,10 +217,16 @@ func (m *DashboardModel) switchView(v ViewMode) tea.Cmd {
 }
 
 func (m *DashboardModel) handleViewChange() tea.Cmd {
-	// Diff/log panes belong to the previous view's repo; drop them so the
-	// GitHub tab can never render a local repo's diff.
+	// Panes, overlays, and modals are scoped to the previous view's repo;
+	// drop them all so nothing bleeds across a switch. The prompt is kept
+	// because the clone flow (global Ctrl+L) opens it without a repo.
 	m.gitDiffActive = false
 	m.gitLogActive = false
+	m.syncOverlay = false
+	m.hunkMode = false
+	m.overlay = nil
+	m.confirm = nil
+	m.fileCursor = 0
 	switch m.viewMode {
 	case ViewLocal:
 		m.message = "Showing local repositories"

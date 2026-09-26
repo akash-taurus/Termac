@@ -166,6 +166,11 @@ func (m DashboardModel) renderHunkBar(pal theme.Palette, width int) string {
 	}
 	hint := lipgloss.NewStyle().Foreground(pal.Highlight).Bold(true).
 		Render(fmt.Sprintf(" ⚡ HUNK MODE %d/%d — [n/p] select · [s] stage hunk · [Esc] exit", pos, total))
+	if m.hunkCursor < len(m.overlay.hunks) {
+		hdr := lipgloss.NewStyle().Foreground(pal.Muted).
+			Render("   " + trunc(m.overlay.hunks[m.hunkCursor].Header, 60))
+		hint += hdr
+	}
 	pad := width - lipgloss.Width(hint) - 1
 	if pad > 0 {
 		return hint + strings.Repeat(" ", pad)

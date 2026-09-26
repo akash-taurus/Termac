@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -28,6 +29,10 @@ func (m DashboardModel) View() string {
 		termHeight = 30
 	}
 
+	// Responsive breakpoints
+	isNarrow := termWidth < 100
+	isVeryNarrow := termWidth < 80
+
 	// 1. Top Title Bar & Header
 	logo := lipgloss.NewStyle().
 		Bold(true).
@@ -48,13 +53,10 @@ func (m DashboardModel) View() string {
 	themePill := lipgloss.NewStyle().
 		Foreground(pal.Highlight).
 		Bold(true).
-		Render("🎨 "+pal.Name) + lipgloss.NewStyle().Foreground(pal.Muted).Render(" [t]")
+		Render("🎨 " + pal.Name) + lipgloss.NewStyle().Foreground(pal.Muted).Render(" [t]")
 
 	var userPill string
 	if m.userName != "" {
-		// Show the active credential family next to the user so a stale
-		// stored token (e.g. device-flow) is visible at a glance instead
-		// of surfacing only when creation fails.
 		credTag := ""
 		if m.token != nil {
 			switch {
@@ -70,20 +72,23 @@ func (m DashboardModel) View() string {
 				credTag = " [custom token]"
 			}
 		}
-		userPill = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(pal.Success).
-			Render("● @" + m.userName + credTag)
+		if isVeryNarrow {
+			userPill = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(pal.Success).
+				Render("● @" + m.userName)
+		} else {
+			userPill = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(pal.Success).
+				Render("● @" + m.userName + credTag)
+		}
 	} else {
 		userPill = lipgloss.NewStyle().
 			Foreground(pal.Muted).
 			Render("○ Guest [l]")
 	}
 
-	// Navigation-bar credential button: a real click target (mouse is enabled)
-	// that logs out when authenticated and opens the login modal otherwise. It
-	// lives in the nav bar (not the title bar) so identity stays in the header
-	// and actions stay with navigation.
 	var authButton string
 	if m.userName != "" {
 		authButton = lipgloss.NewStyle().
@@ -114,25 +119,27 @@ func (m DashboardModel) View() string {
 	}
 	headerLine := lipgloss.JoinHorizontal(lipgloss.Center, leftHeader, strings.Repeat(" ", headerGap), rightHeader)
 
-	// 2. Navigation Tabs
-	tabLocal := formatTab("1", "Local Repos", "📁", m.viewMode == ViewLocal && !m.explorerMode, pal)
-	tabGH := formatTab("2", "GitHub", "🐙", m.viewMode == ViewGitHub && !m.explorerMode, pal)
-	tabSys := formatTab("3", "System Metrics", "📈", m.viewMode == ViewSystem, pal)
-	tabPlug := formatTab("4", "Plugins", "🔌", m.viewMode == ViewPlugins, pal)
+	// 2. Navigation Tabs (responsive: short labels when narrow)
+	tabLocal := formatTab("1", "Local", "📁", m.viewMode == ViewLocal && !m.explorerMode, pal, isNarrow)
+	tabGH := formatTab("2", "GitHub", "🐙", m.viewMode == ViewGitHub && !m.explorerMode, pal, isNarrow)
+	tabSys := formatTab("3", "System", "📈", m.viewMode == ViewSystem, pal, isNarrow)
+	tabPlug := formatTab("4", "Plugins", "🔌", m.viewMode == ViewPlugins, pal, isNarrow)
 
 	tabsList := []string{tabLocal, tabGH, tabSys, tabPlug}
 	if m.explorerMode && m.activeExplorer != nil {
+		expLabel := "EXPLORER"
+		if !isNarrow {
+			expLabel = "EXPLORER: " + m.activeExplorer.RelativeCurrentPath()
+		}
 		expTab := lipgloss.NewStyle().
 			Bold(true).
 			Background(pal.Highlight).
 			Foreground(pal.Background).
 			Padding(0, 1).
 			MarginRight(1).
-			Render(fmt.Sprintf(" 📂 EXPLORER: %s ", m.activeExplorer.RelativeCurrentPath()))
+			Render(fmt.Sprintf(" 📂 %s ", expLabel))
 		tabsList = append(tabsList, expTab)
 	}
-	// Right-align the credential button on the same row as the tabs so it
-	// reads as part of the navigation bar.
 	tabsLeft := lipgloss.JoinHorizontal(lipgloss.Top, tabsList...)
 	navGap := termWidth - lipgloss.Width(tabsLeft) - lipgloss.Width(authButton) - 2
 	if navGap < 1 {
@@ -140,73 +147,22 @@ func (m DashboardModel) View() string {
 	}
 	tabsLine := lipgloss.JoinHorizontal(lipgloss.Top, tabsLeft, strings.Repeat(" ", navGap), authButton)
 
-	// 3. Subtitle / Shortcut Keycaps Bar
+	// 3. Subtitle / Shortcut Keycaps Bar (responsive: collapse at narrow widths)
 	var keyItems []string
 	if m.explorerMode {
-		keyItems = []string{
-			renderKeyBadge("Enter / →", "Open", pal),
-			renderKeyBadge("Backspace / ←", "Up", pal),
-			renderKeyBadge("j / k", "Move", pal),
-			renderKeyBadge("e", "GUI Explorer", pal),
-			renderKeyBadge("p", "Terminal", pal),
-			renderKeyBadge("v", "VS Code", pal),
-			renderKeyBadge("r", "Refresh", pal),
-			renderKeyBadge("t", "Theme", pal),
-			renderKeyBadge("Esc / b", "Back to Repos", pal),
-		}
+		keyItems = m.explorerKeyItems(pal, isNarrow)
 	} else if m.viewMode == ViewGitHub {
-		keyItems = []string{
-			renderKeyBadge("Tab", "Switch Tab", pal),
-			renderKeyBadge("l", "Login / PAT", pal),
-			renderKeyBadge("u", "Logout", pal),
-			renderKeyBadge("r", "Refresh", pal),
-			renderKeyBadge("Enter", "Details", pal),
-			renderKeyBadge("t", "Theme", pal),
-			renderKeyBadge("q", "Quit", pal),
-		}
+		keyItems = m.githubKeyItems(pal, isNarrow)
 	} else if m.viewMode == ViewPlugins {
-		keyItems = []string{
-			renderKeyBadge("Tab", "Switch Tab", pal),
-			renderKeyBadge("s", "Start Plugin", pal),
-			renderKeyBadge("x", "Stop", pal),
-			renderKeyBadge("r", "Reload / Render", pal),
-			renderKeyBadge("j/k", "Select", pal),
-			renderKeyBadge("t", "Theme", pal),
-			renderKeyBadge("q", "Quit", pal),
-		}
+		keyItems = m.pluginsKeyItems(pal, isNarrow)
 	} else if m.viewMode == ViewSystem {
-		keyItems = []string{
-			renderKeyBadge("Tab", "Switch Tab", pal),
-			renderKeyBadge("r", "Refresh Metrics", pal),
-			renderKeyBadge("t", "Theme", pal),
-			renderKeyBadge("w", "Add to WT", pal),
-			renderKeyBadge("q", "Quit", pal),
-		}
+		keyItems = m.systemKeyItems(pal, isNarrow)
 	} else {
-		// ViewLocal
-		keyItems = []string{
-			renderKeyBadge("n", "Create & Push", pal),
-			renderKeyBadge("b", "Browse GUI", pal),
-			renderKeyBadge("o", "Open Folder", pal),
-			renderKeyBadge("i", "Init Git", pal),
-			renderKeyBadge("a", "Stage All", pal),
-			renderKeyBadge("c", "Commit", pal),
-			renderKeyBadge("P", "Push", pal),
-			renderKeyBadge("F", "Pull", pal),
-			renderKeyBadge("d", "Diff", pal),
-			renderKeyBadge("g", "Log", pal),
-			renderKeyBadge("f / Enter", "Files", pal),
-			renderKeyBadge("e", "GUI Explorer", pal),
-			renderKeyBadge("p", "Terminal", pal),
-			renderKeyBadge("l", "Login", pal),
-			renderKeyBadge("u", "Logout", pal),
-			renderKeyBadge("t", "Theme", pal),
-			renderKeyBadge("q", "Quit", pal),
-		}
+		keyItems = m.localKeyItems(pal, isNarrow)
 	}
 
 	bullet := lipgloss.NewStyle().Foreground(pal.Border).Render("  •  ")
-	subtitleLine := " " + strings.Join(keyItems, bullet)
+	subtitleLine := " " + fitKeyItems(keyItems, bullet, termWidth-2, pal)
 
 	// Thin horizontal divider
 	dividerLine := lipgloss.NewStyle().Foreground(pal.Border).Render(strings.Repeat("─", termWidth))
@@ -245,14 +201,51 @@ func (m DashboardModel) View() string {
 	// main body; the hunk-mode bar rides above the diff pane.
 	mainBody = m.advancedViewHook(pal, termWidth, mainHeight, mainBody)
 
-	// 5. Status Bar with Indicator Icon
+	// 5. Status Bar with Indicator Icon, context and clock.
 	statusIcon := statusIconFor(m.statusLevel, pal)
+	statusPrefix := fmt.Sprintf("%sStatus: ", statusIcon)
+
+	// Right-hand context: active branch (Local tab) and wall clock. Refreshes
+	// because View() re-runs on every systemTickMsg (every 1.5 s).
+	var ctxParts []string
+	if m.viewMode == ViewLocal && m.selected >= 0 && m.selected < len(m.repos) {
+		if br := m.repos[m.selected].Branch; br != "" && br != "…" && br != "unknown" {
+			ctxParts = append(ctxParts, lipgloss.NewStyle().
+				Foreground(pal.Highlight).Bold(true).Render("⎇ "+br))
+		}
+	}
+	ctxParts = append(ctxParts, lipgloss.NewStyle().
+		Foreground(pal.Muted).Render(time.Now().Format("15:04:05")))
+	ctxSep := lipgloss.NewStyle().Foreground(pal.Border).Render("  │  ")
+	statusRight := strings.Join(ctxParts, ctxSep)
+
+	// Fit within the status bar's inner width (padding 1 each side).
+	inner := termWidth - 2
+	if inner < 20 {
+		inner = 20
+	}
+	rightW := lipgloss.Width(statusRight)
+	msgRoom := inner - lipgloss.Width(statusPrefix) - rightW - 1
+	if msgRoom < 10 {
+		// Not enough room for context: drop it, then keep a message stub.
+		statusRight = ""
+		rightW = 0
+		msgRoom = inner - lipgloss.Width(statusPrefix) - 1
+		if msgRoom < 10 {
+			msgRoom = 10
+		}
+	}
+	left := statusPrefix + trunc(m.message, msgRoom)
+	gap := inner - lipgloss.Width(left) - rightW
+	if gap < 1 {
+		gap = 1
+	}
 
 	statusBar := lipgloss.NewStyle().
 		Background(pal.Background).
 		Foreground(pal.Foreground).
 		Padding(0, 1).
-		Render(fmt.Sprintf("%sStatus: %s", statusIcon, m.message))
+		Render(left + strings.Repeat(" ", gap) + statusRight)
 
 	// 6. Bottom Footer
 	// The authenticated user already appears in the header; keep the footer
@@ -291,12 +284,16 @@ func (m DashboardModel) View() string {
 	return lipgloss.NewStyle().Width(termWidth).Height(termHeight).Render(content)
 }
 
-func formatTab(num, name, icon string, active bool, pal theme.Palette) string {
+func formatTab(num, name, icon string, active bool, pal theme.Palette, isNarrow bool) string {
+	labelName := name
+	if isNarrow {
+		labelName = ""
+	}
 	if active {
 		label := fmt.Sprintf(" %s %s %s ",
 			lipgloss.NewStyle().Bold(true).Foreground(pal.Highlight).Render(num),
 			icon,
-			name,
+			labelName,
 		)
 		return lipgloss.NewStyle().
 			Bold(true).
@@ -309,7 +306,7 @@ func formatTab(num, name, icon string, active bool, pal theme.Palette) string {
 	label := fmt.Sprintf(" %s %s %s ",
 		lipgloss.NewStyle().Foreground(pal.Muted).Render(num),
 		icon,
-		name,
+		labelName,
 	)
 	return lipgloss.NewStyle().
 		Foreground(pal.Muted).
@@ -322,6 +319,134 @@ func renderKeyBadge(key, label string, pal theme.Palette) string {
 	k := lipgloss.NewStyle().Bold(true).Foreground(pal.Highlight).Render("[" + key + "]")
 	l := lipgloss.NewStyle().Foreground(pal.Foreground).Render(" " + label)
 	return k + l
+}
+
+func (m DashboardModel) localKeyItems(pal theme.Palette, narrow bool) []string {
+	if narrow {
+		return []string{
+			renderKeyBadge("n", "Create", pal),
+			renderKeyBadge("a", "Stage", pal),
+			renderKeyBadge("c", "Commit", pal),
+			renderKeyBadge("P", "Push", pal),
+			renderKeyBadge("F", "Pull", pal),
+			renderKeyBadge("d", "Diff", pal),
+			renderKeyBadge("g", "Log", pal),
+			renderKeyBadge("f", "Files", pal),
+			renderKeyBadge("o", "Open", pal),
+			renderKeyBadge("l", "Login", pal),
+			renderKeyBadge("t", "Theme", pal),
+			renderKeyBadge("q", "Quit", pal),
+		}
+	}
+	return []string{
+		renderKeyBadge("n", "Create & Push", pal),
+		renderKeyBadge("b", "Browse GUI", pal),
+		renderKeyBadge("o", "Open Folder", pal),
+		renderKeyBadge("i", "Init Git", pal),
+		renderKeyBadge("a", "Stage All", pal),
+		renderKeyBadge("c", "Commit", pal),
+		renderKeyBadge("P", "Push", pal),
+		renderKeyBadge("F", "Pull", pal),
+		renderKeyBadge("d", "Diff", pal),
+		renderKeyBadge("g", "Log", pal),
+		renderKeyBadge("f / Enter", "Files", pal),
+		renderKeyBadge("e", "GUI Explorer", pal),
+		renderKeyBadge("p", "Terminal", pal),
+		renderKeyBadge("l", "Login", pal),
+		renderKeyBadge("u", "Logout", pal),
+		renderKeyBadge("t", "Theme", pal),
+		renderKeyBadge("q", "Quit", pal),
+	}
+}
+
+func (m DashboardModel) githubKeyItems(pal theme.Palette, narrow bool) []string {
+	if narrow {
+		return []string{
+			renderKeyBadge("Tab", "Tabs", pal),
+			renderKeyBadge("l", "Login", pal),
+			renderKeyBadge("r", "Refresh", pal),
+			renderKeyBadge("Enter", "Details", pal),
+			renderKeyBadge("t", "Theme", pal),
+			renderKeyBadge("q", "Quit", pal),
+		}
+	}
+	return []string{
+		renderKeyBadge("Tab", "Switch Tab", pal),
+		renderKeyBadge("l", "Login / PAT", pal),
+		renderKeyBadge("u", "Logout", pal),
+		renderKeyBadge("r", "Refresh", pal),
+		renderKeyBadge("Enter", "Details", pal),
+		renderKeyBadge("t", "Theme", pal),
+		renderKeyBadge("q", "Quit", pal),
+	}
+}
+
+func (m DashboardModel) pluginsKeyItems(pal theme.Palette, narrow bool) []string {
+	if narrow {
+		return []string{
+			renderKeyBadge("Tab", "Tabs", pal),
+			renderKeyBadge("s", "Start", pal),
+			renderKeyBadge("x", "Stop", pal),
+			renderKeyBadge("r", "Reload", pal),
+			renderKeyBadge("j/k", "Select", pal),
+			renderKeyBadge("t", "Theme", pal),
+			renderKeyBadge("q", "Quit", pal),
+		}
+	}
+	return []string{
+		renderKeyBadge("Tab", "Switch Tab", pal),
+		renderKeyBadge("s", "Start Plugin", pal),
+		renderKeyBadge("x", "Stop", pal),
+		renderKeyBadge("r", "Reload / Render", pal),
+		renderKeyBadge("j/k", "Select", pal),
+		renderKeyBadge("t", "Theme", pal),
+		renderKeyBadge("q", "Quit", pal),
+	}
+}
+
+func (m DashboardModel) systemKeyItems(pal theme.Palette, narrow bool) []string {
+	if narrow {
+		return []string{
+			renderKeyBadge("Tab", "Tabs", pal),
+			renderKeyBadge("r", "Refresh", pal),
+			renderKeyBadge("t", "Theme", pal),
+			renderKeyBadge("q", "Quit", pal),
+		}
+	}
+	return []string{
+		renderKeyBadge("Tab", "Switch Tab", pal),
+		renderKeyBadge("r", "Refresh Metrics", pal),
+		renderKeyBadge("t", "Theme", pal),
+		renderKeyBadge("w", "Add to WT", pal),
+		renderKeyBadge("q", "Quit", pal),
+	}
+}
+
+func (m DashboardModel) explorerKeyItems(pal theme.Palette, narrow bool) []string {
+	if narrow {
+		return []string{
+			renderKeyBadge("Enter", "Open", pal),
+			renderKeyBadge("←/→", "Nav", pal),
+			renderKeyBadge("j/k", "Move", pal),
+			renderKeyBadge("e", "Explorer", pal),
+			renderKeyBadge("p", "Terminal", pal),
+			renderKeyBadge("v", "VS Code", pal),
+			renderKeyBadge("r", "Refresh", pal),
+			renderKeyBadge("t", "Theme", pal),
+			renderKeyBadge("Esc", "Back", pal),
+		}
+	}
+	return []string{
+		renderKeyBadge("Enter / →", "Open", pal),
+		renderKeyBadge("Backspace / ←", "Up", pal),
+		renderKeyBadge("j / k", "Move", pal),
+		renderKeyBadge("e", "GUI Explorer", pal),
+		renderKeyBadge("p", "Terminal", pal),
+		renderKeyBadge("v", "VS Code", pal),
+		renderKeyBadge("r", "Refresh", pal),
+		renderKeyBadge("t", "Theme", pal),
+		renderKeyBadge("Esc / b", "Back to Repos", pal),
+	}
 }
 
 func (m DashboardModel) renderAuthModal(pal theme.Palette) string {
@@ -509,16 +634,17 @@ func (m DashboardModel) renderPublishModal(pal theme.Palette) string {
 }
 
 func (m DashboardModel) renderRepoView(pal theme.Palette, totalWidth, totalHeight int) string {
+	isNarrow := totalWidth < 100
 	leftWidth := (totalWidth * 42) / 100
-	if leftWidth < 36 {
-		leftWidth = 36
+	if leftWidth < 30 {
+		leftWidth = 30
 	}
 	if leftWidth > 52 {
 		leftWidth = 52
 	}
 	rightWidth := totalWidth - leftWidth - 4
-	if rightWidth < 38 {
-		rightWidth = 38
+	if rightWidth < 34 {
+		rightWidth = 34
 	}
 
 	// Left: Repo list
@@ -527,14 +653,26 @@ func (m DashboardModel) renderRepoView(pal theme.Palette, totalWidth, totalHeigh
 	if m.viewMode == ViewGitHub {
 		repoTitle = "🐙 GitHub Repositories"
 	}
+	if isNarrow {
+		repoTitle = "📦 Repos"
+		if m.viewMode == ViewGitHub {
+			repoTitle = "🐙 GitHub"
+		}
+	}
 	repoList.WriteString(lipgloss.NewStyle().
 		Bold(true).
 		Foreground(pal.Primary).
 		Render(fmt.Sprintf(" %s (%d)\n", repoTitle, len(m.repos))))
 
-	repoList.WriteString(lipgloss.NewStyle().
-		Foreground(pal.Muted).
-		Render(fmt.Sprintf("   %-18s %-9s %s\n", "NAME", "BRANCH", "STATUS")))
+	if isNarrow {
+		repoList.WriteString(lipgloss.NewStyle().
+			Foreground(pal.Muted).
+			Render(fmt.Sprintf("   %-12s %-7s %s\n", "NAME", "BRANCH", "STATUS")))
+	} else {
+		repoList.WriteString(lipgloss.NewStyle().
+			Foreground(pal.Muted).
+			Render(fmt.Sprintf("   %-18s %-9s %s\n", "NAME", "BRANCH", "STATUS")))
+	}
 	repoList.WriteString(lipgloss.NewStyle().
 		Foreground(pal.Border).
 		Render("  " + strings.Repeat("─", leftWidth-6) + "\n"))
@@ -578,25 +716,29 @@ func (m DashboardModel) renderRepoView(pal theme.Palette, totalWidth, totalHeigh
 				statusBadge = lipgloss.NewStyle().Foreground(pal.Muted).Render(string(repo.Status))
 			}
 
-			nameColWidth := leftWidth - 24
-			if nameColWidth < 12 {
-				nameColWidth = 12
+			branchWidth := 9
+			if isNarrow {
+				branchWidth = 7
+			}
+			nameColWidth := leftWidth - branchWidth - 14
+			if nameColWidth < 10 {
+				nameColWidth = 10
 			}
 			rName := trunc(repo.Name, nameColWidth)
-			rBranch := trunc(repo.Branch, 8)
+			rBranch := trunc(repo.Branch, branchWidth)
 			if rBranch == "" {
 				rBranch = "-"
 			}
 
 			if i == m.selected {
-				rowText := fmt.Sprintf(" ▸ %-*s %-9s %s", nameColWidth, rName, rBranch, statusBadge)
+				rowText := fmt.Sprintf(" ▸ %-*s %-*s %s", nameColWidth, rName, branchWidth, rBranch, statusBadge)
 				repoList.WriteString(lipgloss.NewStyle().
 					Background(pal.Secondary).
 					Foreground(pal.Foreground).
 					Bold(true).
 					Render(rowText) + "\n")
 			} else {
-				rowText := fmt.Sprintf("   %-*s %-9s %s\n", nameColWidth, rName, rBranch, statusBadge)
+				rowText := fmt.Sprintf("   %-*s %-*s %s\n", nameColWidth, rName, branchWidth, rBranch, statusBadge)
 				repoList.WriteString(rowText)
 			}
 		}
@@ -631,13 +773,42 @@ func (m DashboardModel) renderGitDiffView(pal theme.Palette, width, height int) 
 		Bold(true).
 		Foreground(pal.Primary).
 		Render(fmt.Sprintf("📜 Git Diff (HEAD) — %s", repoName))
-	b.WriteString(header + "  " + lipgloss.NewStyle().Foreground(pal.Highlight).Bold(true).Render("[d / Esc] Back\n\n"))
 
-	if strings.TrimSpace(m.gitDiffText) == "" {
+	// In hunk mode, show only the active hunk so n/p visibly swap the pane.
+	// The hunk bodies from GitSplitHunks already carry the file header, so each
+	// renders as a standalone patch. (Previously the full diff was always shown
+	// and hunk mode was a counter with no visible target.)
+	body := m.gitDiffText
+	if m.hunkMode && m.overlay != nil && m.hunkCursor < len(m.overlay.hunks) {
+		body = m.overlay.hunks[m.hunkCursor].Body
+	}
+
+	// Line-change summary so size is obvious before scrolling. Counts skip
+	// +++/--- file headers (they'd otherwise inflate both counters).
+	adds, dels := 0, 0
+	for _, l := range strings.Split(body, "\n") {
+		switch {
+		case strings.HasPrefix(l, "+++"), strings.HasPrefix(l, "---"):
+		case strings.HasPrefix(l, "+"):
+			adds++
+		case strings.HasPrefix(l, "-"):
+			dels++
+		}
+	}
+	summary := ""
+	if adds+dels > 0 {
+		summary = "  " +
+			lipgloss.NewStyle().Foreground(pal.Success).Bold(true).Render(fmt.Sprintf("+%d", adds)) +
+			lipgloss.NewStyle().Foreground(pal.Muted).Render(" / ") +
+			lipgloss.NewStyle().Foreground(pal.Danger).Bold(true).Render(fmt.Sprintf("−%d", dels))
+	}
+	b.WriteString(header + summary + "  " + lipgloss.NewStyle().Foreground(pal.Highlight).Bold(true).Render("[d / Esc] Back\n\n"))
+
+	if strings.TrimSpace(body) == "" {
 		b.WriteString(lipgloss.NewStyle().Foreground(pal.Success).Render("  ✔ Working tree is clean. No unstaged or staged changes relative to HEAD.\n\n"))
 		b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render("  Press [c] to commit changes or [Esc] to exit diff view.\n"))
 	} else {
-		lines := strings.Split(m.gitDiffText, "\n")
+		lines := strings.Split(body, "\n")
 		maxLines := height - 6
 		if maxLines < 6 {
 			maxLines = 6
@@ -683,7 +854,7 @@ func (m DashboardModel) renderGitLogView(pal theme.Palette, width, height int) s
 		Bold(true).
 		Foreground(pal.Primary).
 		Render(fmt.Sprintf("📜 Git Commit History — %s", repoName))
-	b.WriteString(header + "  " + lipgloss.NewStyle().Foreground(pal.Highlight).Bold(true).Render("[g / Esc] Back · [j/k] select · [Enter] diff / reset\n\n"))
+	b.WriteString(header + "  " + lipgloss.NewStyle().Foreground(pal.Highlight).Bold(true).Render("[g / Esc] Back · [j/k] select · [Enter] diff · [R] checkout · [Shift+R] hard reset\n\n"))
 
 	if len(m.gitLogItems) == 0 {
 		b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render("  No commits found in this repository branch.\n\n"))
@@ -782,24 +953,44 @@ func (m DashboardModel) viewDetail(pal theme.Palette, detailWidth, totalHeight i
 			Render("Non-Git Folder")
 		b.WriteString(title + "  " + badge + "\n\n")
 
-		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render(" ┌─ Folder Information " + strings.Repeat("─", max(innerW-22, 2)) + "┐\n"))
-		b.WriteString(fmt.Sprintf(" │  %-10s : %s\n", "Path", lipgloss.NewStyle().Foreground(pal.Foreground).Render(truncPath(repo.Path, innerW-16))))
-		b.WriteString(fmt.Sprintf(" │  %-10s : %s\n", "Status", lipgloss.NewStyle().Foreground(pal.Warning).Bold(true).Render("Regular Local Directory (No Git tracking)")))
-		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render(" └" + strings.Repeat("─", innerW) + "┘\n\n"))
+		boxW := innerW
+		if boxW < 40 {
+			boxW = 40
+		}
+		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render(" ┌─ Folder Information " + strings.Repeat("─", max(boxW-22, 2)) + "┐\n"))
+		b.WriteString(fmt.Sprintf(" │  %-10s : %s\n", "Path", lipgloss.NewStyle().Foreground(pal.Foreground).Render(truncPath(repo.Path, boxW-16))))
+		statusText := "Regular Local Directory (No Git tracking)"
+		if boxW < 50 {
+			statusText = "Local Directory (No Git)"
+		}
+		b.WriteString(fmt.Sprintf(" │  %-10s : %s\n", "Status", lipgloss.NewStyle().Foreground(pal.Warning).Bold(true).Render(statusText)))
+		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render(" └" + strings.Repeat("─", boxW) + "┘\n\n"))
 
 		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Highlight).Render(" ⚡ Actions Available:\n"))
 		btnPublish := lipgloss.NewStyle().Bold(true).Background(pal.Primary).Foreground(pal.Background).Padding(0, 1).Render("[n] Create & Push to GitHub")
 		btnInit := lipgloss.NewStyle().Bold(true).Background(pal.Secondary).Foreground(pal.Foreground).Padding(0, 1).Render("[i] Git Init")
-		b.WriteString("   " + btnPublish + "  " + btnInit + "\n\n")
+		if boxW < 60 {
+			b.WriteString("   " + btnPublish + "\n")
+			b.WriteString("   " + btnInit + "\n\n")
+		} else {
+			b.WriteString("   " + btnPublish + "  " + btnInit + "\n\n")
+		}
 
 		btnBrowse := lipgloss.NewStyle().Bold(true).Background(pal.Border).Foreground(pal.Foreground).Padding(0, 1).Render("[b] Browse GUI")
 		btnOpen := lipgloss.NewStyle().Bold(true).Background(pal.Border).Foreground(pal.Foreground).Padding(0, 1).Render("[o] Open Folder")
-		b.WriteString("   " + btnBrowse + "  " + btnOpen + "\n\n")
-
 		btnFiles := lipgloss.NewStyle().Bold(true).Background(pal.Border).Foreground(pal.Foreground).Padding(0, 1).Render("[f / Enter] Browse Files")
 		btnExp := lipgloss.NewStyle().Bold(true).Background(pal.Border).Foreground(pal.Foreground).Padding(0, 1).Render("[e] GUI Explorer")
 		btnTerm := lipgloss.NewStyle().Bold(true).Background(pal.Border).Foreground(pal.Foreground).Padding(0, 1).Render("[p] Terminal")
-		b.WriteString("   " + btnFiles + "  " + btnExp + "  " + btnTerm + "\n")
+		if boxW < 60 {
+			b.WriteString("   " + btnBrowse + "\n")
+			b.WriteString("   " + btnOpen + "\n\n")
+			b.WriteString("   " + btnFiles + "\n")
+			b.WriteString("   " + btnExp + "\n")
+			b.WriteString("   " + btnTerm + "\n")
+		} else {
+			b.WriteString("   " + btnBrowse + "  " + btnOpen + "\n\n")
+			b.WriteString("   " + btnFiles + "  " + btnExp + "  " + btnTerm + "\n")
+		}
 
 		return lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -886,13 +1077,31 @@ func (m DashboardModel) viewDetail(pal theme.Palette, detailWidth, totalHeight i
 	// Changed-files list with staging cursor (Local repos only). S/U stage
 	// and unstage the highlighted row; D discards it (with confirmation).
 	if repo.LocalOnly && m.detailedGitStatus != nil && len(m.detailedGitStatus.Files) > 0 {
+		files := m.detailedGitStatus.Files
 		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render(" ┌─ Changed Files " + strings.Repeat("─", max(innerW-16, 2)) + "┐\n"))
-		fileLimit := 6
-		for idx, f := range m.detailedGitStatus.Files {
-			if idx >= fileLimit {
-				b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).Render(fmt.Sprintf(" │  … and %d more file(s)\n", len(m.detailedGitStatus.Files)-fileLimit)))
-				break
-			}
+
+		// Window the file list so the cursor row is always visible. The cursor
+		// wraps at both ends (see advanced_update.go), so without this scroll the
+		// highlighted row could sit off-screen once a repo had more changed files
+		// than the pane height.
+		const fileWindow = 6
+		start := 0
+		if m.fileCursor >= fileWindow {
+			start = m.fileCursor - fileWindow + 1
+		}
+		if maxStart := len(files) - fileWindow; start > maxStart {
+			start = maxStart
+		}
+		if start < 0 {
+			start = 0
+		}
+		end := start + fileWindow
+		if end > len(files) {
+			end = len(files)
+		}
+
+		for idx := start; idx < end; idx++ {
+			f := files[idx]
 			cursor := "  "
 			rowStyle := lipgloss.NewStyle().Foreground(pal.Foreground)
 			if idx == m.fileCursor {
@@ -912,8 +1121,13 @@ func (m DashboardModel) viewDetail(pal theme.Palette, detailWidth, totalHeight i
 			path := truncPath(f.Path, innerW-14)
 			b.WriteString(fmt.Sprintf(" │ %s%s %s\n", cursor, badge, rowStyle.Render(path)))
 		}
+
+		if len(files) > fileWindow {
+			b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).
+				Render(fmt.Sprintf(" │  [%d-%d/%d]  ←/→ move\n", start+1, end, len(files))))
+		}
 		b.WriteString(lipgloss.NewStyle().Foreground(pal.Muted).
-			Render(fmt.Sprintf(" │  [S] stage · [U] unstage · [D] discard · [h] hunks · [Ctrl+Y] history · [Ctrl+B] blame · [Ctrl+U] unstage all\n")))
+			Render(" │  [S] stage · [U] unstage · [D] discard · [h] hunks · [Ctrl+Y] history · [Ctrl+B] blame · [Ctrl+U] unstage all\n"))
 		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render(" └" + strings.Repeat("─", innerW) + "┘\n\n"))
 	}
 
@@ -937,26 +1151,48 @@ func (m DashboardModel) viewDetail(pal theme.Palette, detailWidth, totalHeight i
 		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Secondary).Render(" └" + strings.Repeat("─", innerW) + "┘\n\n"))
 	}
 
-	// Action buttons
+	// Action buttons (responsive layout)
 	if repo.LocalOnly {
 		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(pal.Highlight).Render(" ⚡ Git Actions:\n"))
+
 		btnStage := lipgloss.NewStyle().Bold(true).Background(pal.Secondary).Foreground(pal.Foreground).Padding(0, 1).Render("[a] Stage All")
 		btnCommit := lipgloss.NewStyle().Bold(true).Background(pal.Secondary).Foreground(pal.Foreground).Padding(0, 1).Render("[c] Commit")
 		btnPublish := lipgloss.NewStyle().Bold(true).Background(pal.Highlight).Foreground(pal.Background).Padding(0, 1).Render("[n] Create & Push Repo")
-		b.WriteString("   " + btnStage + "  " + btnCommit + "  " + btnPublish + "\n\n")
-
 		btnPush := lipgloss.NewStyle().Bold(true).Background(pal.Primary).Foreground(pal.Background).Padding(0, 1).Render("[P] Push")
 		btnPull := lipgloss.NewStyle().Bold(true).Background(pal.Primary).Foreground(pal.Background).Padding(0, 1).Render("[F] Pull")
 		btnDiff := lipgloss.NewStyle().Bold(true).Background(pal.Border).Foreground(pal.Foreground).Padding(0, 1).Render("[d] Diff")
 		btnLog := lipgloss.NewStyle().Bold(true).Background(pal.Border).Foreground(pal.Foreground).Padding(0, 1).Render("[g] Log")
-		b.WriteString("   " + btnPush + "  " + btnPull + "  " + btnDiff + "  " + btnLog + "\n\n")
-
 		btnBrowse := lipgloss.NewStyle().Bold(true).Background(pal.Border).Foreground(pal.Foreground).Padding(0, 1).Render("[b] Browse GUI")
 		btnOpen := lipgloss.NewStyle().Bold(true).Background(pal.Border).Foreground(pal.Foreground).Padding(0, 1).Render("[o] Open Folder")
 		btnExplore := lipgloss.NewStyle().Bold(true).Background(pal.Border).Foreground(pal.Foreground).Padding(0, 1).Render("[f / Enter] Files")
 		btnExp := lipgloss.NewStyle().Bold(true).Background(pal.Border).Foreground(pal.Foreground).Padding(0, 1).Render("[e] GUI Explorer")
 		btnTerm := lipgloss.NewStyle().Bold(true).Background(pal.Border).Foreground(pal.Foreground).Padding(0, 1).Render("[p] Terminal")
-		b.WriteString("   " + btnBrowse + "  " + btnOpen + "  " + btnExplore + "  " + btnExp + "  " + btnTerm + "\n")
+
+		if innerW < 60 {
+			// Very narrow: stack all buttons vertically
+			b.WriteString("   " + btnStage + "\n")
+			b.WriteString("   " + btnCommit + "\n")
+			b.WriteString("   " + btnPublish + "\n\n")
+			b.WriteString("   " + btnPush + "\n")
+			b.WriteString("   " + btnPull + "\n")
+			b.WriteString("   " + btnDiff + "\n")
+			b.WriteString("   " + btnLog + "\n\n")
+			b.WriteString("   " + btnBrowse + "\n")
+			b.WriteString("   " + btnOpen + "\n")
+			b.WriteString("   " + btnExplore + "\n")
+			b.WriteString("   " + btnExp + "\n")
+			b.WriteString("   " + btnTerm + "\n")
+		} else if innerW < 90 {
+			// Narrow: group in 2-3 columns
+			b.WriteString("   " + btnStage + "  " + btnCommit + "  " + btnPublish + "\n\n")
+			b.WriteString("   " + btnPush + "  " + btnPull + "  " + btnDiff + "  " + btnLog + "\n\n")
+			b.WriteString("   " + btnBrowse + "  " + btnOpen + "  " + btnExplore + "  " + btnExp + "  " + btnTerm + "\n")
+		} else {
+			// Wide: original 3-row layout
+			b.WriteString("   " + btnStage + "  " + btnCommit + "  " + btnPublish + "\n\n")
+			b.WriteString("   " + btnPush + "  " + btnPull + "  " + btnDiff + "  " + btnLog + "\n\n")
+			b.WriteString("   " + btnBrowse + "  " + btnOpen + "  " + btnExplore + "  " + btnExp + "  " + btnTerm + "\n")
+		}
 	}
 	// GitHub (non-local) repos have no on-disk path, so file/terminal actions
 	// are intentionally omitted rather than rendered as silent no-ops.
@@ -1394,4 +1630,39 @@ func (m DashboardModel) renderPluginsView(pal theme.Palette, totalWidth, totalHe
 		Render(right.String())
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, leftStyle, rightStyle)
+}
+
+// fitKeyItems joins keycap hints with the given bullet separator, dropping
+// hints from the end (with a trailing ellipsis) when the rendered line would
+// exceed maxWidth. Keeps the shortcut bar from wrapping on narrower
+// terminals, where the isNarrow branch alone still overflows.
+func fitKeyItems(items []string, bullet string, maxWidth int, pal theme.Palette) string {
+	if maxWidth <= 0 || len(items) == 0 {
+		return ""
+	}
+	bulletW := lipgloss.Width(bullet)
+	ellipsis := lipgloss.NewStyle().Foreground(pal.Muted).Render("  …")
+	ellipsisW := lipgloss.Width(ellipsis)
+
+	var b strings.Builder
+	used := 0
+	for i, it := range items {
+		w := lipgloss.Width(it)
+		add := w
+		if i > 0 {
+			add += bulletW
+		}
+		// Reserve room for the ellipsis so the last kept hint always fits.
+		if i > 0 && used+add+ellipsisW > maxWidth {
+			b.WriteString(ellipsis)
+			break
+		}
+		if i > 0 {
+			b.WriteString(bullet)
+			used += bulletW
+		}
+		b.WriteString(it)
+		used += w
+	}
+	return b.String()
 }

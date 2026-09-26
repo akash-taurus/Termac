@@ -70,6 +70,45 @@ func GitDiscardFile(repoPath, path string) error {
 	return nil
 }
 
+// GitRestoreFile restores a single file from a specific commit/tree-ish.
+// Uses `git restore -s <sha> -- <path>` (modern Git) with fallback to
+// `git checkout <sha> -- <path>` for older Git versions.
+// Leaves the restored file unstaged in the working tree.
+func GitRestoreFile(repoPath, sha, path string) (string, error) {
+	sha = strings.TrimSpace(sha)
+	path = strings.TrimSpace(path)
+	if sha == "" {
+		return "", fmt.Errorf("commit sha cannot be empty")
+	}
+	if path == "" {
+		return "", fmt.Errorf("file path cannot be empty")
+	}
+	if strings.HasPrefix(sha, "-") || strings.HasPrefix(path, "-") {
+		return "", fmt.Errorf("invalid sha or path")
+	}
+
+	// Try modern `git restore -s <sha> -- <path>` first (Git 2.23+)
+	out, err := runGit(repoPath, "restore", "-s", sha, "--", path)
+	trimmed := strings.TrimSpace(string(out))
+	if err == nil {
+		if trimmed == "" {
+			trimmed = fmt.Sprintf("Restored %s from %s", path, sha[:min(8, len(sha))])
+		}
+		return trimmed, nil
+	}
+
+	// Fallback to `git checkout <sha> -- <path>` for older Git
+	out2, err2 := runGit(repoPath, "checkout", sha, "--", path)
+	trimmed2 := strings.TrimSpace(string(out2))
+	if err2 != nil {
+		return "", fmt.Errorf("git restore %s from %s failed: %s (%s): %w", path, sha, trimmed, trimmed2, err2)
+	}
+	if trimmed2 == "" {
+		trimmed2 = fmt.Sprintf("Restored %s from %s", path, sha[:min(8, len(sha))])
+	}
+	return trimmed2, nil
+}
+
 // GitAmend amends the last commit, optionally folding currently staged
 // changes into it. An empty message keeps the existing one.
 func GitAmend(repoPath, message string, includeStaged bool) (string, error) {

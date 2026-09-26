@@ -41,7 +41,6 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.detailWidth = m.width / 2
 		return m, nil
 
 	case tea.MouseMsg:
@@ -1001,6 +1000,11 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if idx == m.selected {
 			m.detailedGitStatus = msg.GitStatus
 			m.gitLogItems = msg.GitLogs
+			// The file list may have shrunk (a stage/discard/reload); keep the
+			// cursor inside it so a row is always highlighted.
+			if m.detailedGitStatus == nil || m.fileCursor >= len(m.detailedGitStatus.Files) {
+				m.fileCursor = 0
+			}
 			if m.message == "" || strings.HasPrefix(m.message, "Fetching") || strings.HasPrefix(m.message, "Loading") || strings.HasPrefix(m.message, "Updated:") {
 				m.message = fmt.Sprintf("Updated: %s", msg.Detail.Name)
 			}

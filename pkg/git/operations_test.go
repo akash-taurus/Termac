@@ -498,10 +498,6 @@ func TestSplitHunksAndStageHunk(t *testing.T) {
 		if !strings.HasPrefix(h.Header, "@@") {
 			t.Fatalf("hunk %d header invalid: %q", i, h.Header)
 		}
-		if !strings.Contains(h.Body, "diff --git") && i > 0 {
-			// header re-attach check happens implicitly in StageHunk
-			_ = h
-		}
 	}
 	// Stage only the first hunk.
 	if err := GitStageHunk(dir, "a.txt", 0); err != nil {

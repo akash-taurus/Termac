@@ -462,6 +462,13 @@ func publishAndPushCmd(token, userName, repoPath, repoName, description string, 
 	}
 }
 
+func restoreFileCmd(repoPath, sha, path string) tea.Cmd {
+	return func() tea.Msg {
+		out, err := git.GitRestoreFile(repoPath, sha, path)
+		return restoreFileMsg{Repo: repoPath, Path: path, SHA: sha, Output: out, Err: err}
+	}
+}
+
 func githubLogoutCommand() tea.Cmd {
 	return func() tea.Msg {
 		_ = auth.DeleteToken()
@@ -474,5 +481,13 @@ type githubLogoutMsg struct{}
 type pluginActionMsg struct {
 	ID     string
 	Action string
+	Err    error
+}
+
+type restoreFileMsg struct {
+	Repo   string
+	Path   string
+	SHA    string
+	Output string
 	Err    error
 }

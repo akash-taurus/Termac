@@ -29,7 +29,7 @@ import (
 // confirmAction is what the generic confirm modal will run on "yes".
 type confirmAction struct {
 	title    string // shown in the modal
-	kind     string // discriminator: "discard-file", "reset-hard", "revert", "stash-drop", "delete-branch", "checkout-force", "abort", "pr-close", "pr-merge"
+	kind     string // discriminator: "discard-file", "reset-hard", "revert", "stash-drop", "delete-branch", "checkout-force", "abort", "pr-close", "pr-merge", "restore-file"
 	repoPath string
 	arg      string // path, branch, sha, ...
 	arg2     string
@@ -304,7 +304,7 @@ func reflogCmd(repoPath string) tea.Cmd {
 		for _, it := range items {
 			lines = append(lines, fmt.Sprintf("%2d  %s  %-14s %s", it.Index, it.Hash, truncateStr(it.Date, 14), truncateStr(it.Desc, 44)))
 		}
-		return overlayDataMsg{Kind: overlayReflog, Title: "Reflog — Enter: checkout this state · Esc: close", Lines: lines}
+		return overlayDataMsg{Kind: overlayReflog, Title: "Reflog — Enter/R: checkout this state · Shift+R: hard reset here · Esc: close", Lines: lines}
 	}
 }
 
@@ -396,7 +396,7 @@ func fileHistoryCmd(repoPath, path string) tea.Cmd {
 		for _, it := range items {
 			lines = append(lines, fmt.Sprintf("%s  %-10s %-12s %s", it.Hash, it.Author, truncateStr(it.Date, 12), it.Subject))
 		}
-		return overlayDataMsg{Kind: overlayFileHistory, Title: fmt.Sprintf("History of %s — Enter: diff this commit · v: revert · Esc: close", path), Lines: lines}
+		return overlayDataMsg{Kind: overlayFileHistory, Title: fmt.Sprintf("History of %s — Enter: diff this commit · v: revert · Ctrl+E: extract this version · Esc: close", path), Lines: lines}
 	}
 }
 

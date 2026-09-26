@@ -12,10 +12,11 @@ import (
 // cmd.ProcessState plus the OS process handle: two goroutines racing into
 // cmd.Wait() on Windows can lose with a raw NTSTATUS-as-errno (e.g.
 // 0x20000027) that matches no Go sentinel, so racy Wait calls cannot be
-// made safe by error filtering alone. Entries are intentionally never
-// deleted: KillCmd call sites are few (plugin stop, tests) and deleting
-// while another goroutine resolves the same key could hand out two
-// mutexes for one cmd, defeating the purpose.
+// made safe by error filtering alone. Entries are deleted after the lock
+// is released: everything that touches cmd runs inside the lock, so once
+// a caller unlocks it has no further use of that cmd. A subsequent caller
+// gets a fresh mutex and finds ProcessState != nil, taking the skip-Wait
+// branch.
 var killCmdMu sync.Map // map[*exec.Cmd]*sync.Mutex
 
 func mutexForCmd(cmd *exec.Cmd) *sync.Mutex {
@@ -53,7 +54,14 @@ func KillCmd(cmd *exec.Cmd) error {
 	// ProcessState check and Wait below are atomic per command.
 	mu := mutexForCmd(cmd)
 	mu.Lock()
-	defer mu.Unlock()
+	defer func() {
+		mu.Unlock()
+		// Reclaim the entry: plugin start/stop cycles allocate a fresh
+		// *exec.Cmd each time, so without this the map grows for the
+		// lifetime of the process. Safe because everything that touches
+		// cmd runs inside the lock above.
+		killCmdMu.Delete(cmd)
+	}()
 
 	// Terminate the entire descendant process tree. Always attempt to reap
 	// afterwards so a kill failure does not leak a zombie/handle.

@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -142,64 +141,6 @@ func GetLastCommit(repo *libgit.Repository) (author string, message string, err 
 	return commit.Author.Name, commit.Message, nil
 }
 
-// GetStatus returns the working tree status
-func GetStatus(repo *libgit.Repository) (string, error) {
-	w, err := repo.Worktree()
-	if err != nil {
-		return "", err
-	}
-	status, err := w.Status()
-	if err != nil {
-		return "", err
-	}
-
-	if status.IsClean() {
-		return "Clean", nil
-	}
-
-	// Check whether there are any commits yet
-	if _, err := repo.Head(); err != nil {
-		return "No commits yet", nil
-	}
-
-	var changes []string
-	for path, fileStatus := range status {
-		// Consider staged changes too: a file staged but untouched in worktree
-		// reports Worktree=Unmodified with Staging set.
-		wt := fileStatus.Worktree
-		st := fileStatus.Staging
-		switch wt {
-		case libgit.Unmodified:
-			if st == libgit.Unmodified {
-				continue
-			}
-			changes = append(changes, fmt.Sprintf("%s: Staged", path))
-		case libgit.Untracked:
-			changes = append(changes, fmt.Sprintf("%s: Untracked", path))
-		case libgit.Modified:
-			changes = append(changes, fmt.Sprintf("%s: Modified", path))
-		case libgit.Added:
-			changes = append(changes, fmt.Sprintf("%s: Added", path))
-		case libgit.Deleted:
-			changes = append(changes, fmt.Sprintf("%s: Deleted", path))
-		case libgit.Renamed:
-			changes = append(changes, fmt.Sprintf("%s: Renamed", path))
-		case libgit.Copied:
-			changes = append(changes, fmt.Sprintf("%s: Copied", path))
-		default:
-			if st != libgit.Unmodified {
-				changes = append(changes, fmt.Sprintf("%s: Staged", path))
-			}
-		}
-	}
-
-	if len(changes) == 0 {
-		return "Modified", nil
-	}
-	sort.Strings(changes)
-	return strings.Join(changes, "; "), nil
-}
-
 // GetDiffSummary gets a summary of uncommitted changes
 func GetDiffSummary(repo *libgit.Repository) (string, error) {
 	w, err := repo.Worktree()
@@ -307,13 +248,6 @@ func GetRepositoryInfo(repoPath string) (*LocalRepository, error) {
 	if err != nil {
 		message = "unknown"
 	}
-
-	// Get status
-	status, err := GetStatus(repo)
-	if err != nil {
-		status = "unknown"
-	}
-	_ = status // status is used to determine if the repo has changes
 
 	// Get remote host
 	host, err := GetRemoteHost(repoPath)
